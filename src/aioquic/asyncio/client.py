@@ -4,9 +4,9 @@ import socket
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator, Callable, Optional, cast
 
-from ..quic.configuration import QuicConfiguration
-from ..quic.connection import QuicConnection
-from ..tls import SessionTicketHandler
+from aioquic.quic.configuration import QuicConfiguration
+from aioquic.quic.connection import QuicConnection
+from aioquic.tls import SessionTicketHandler
 from .protocol import QuicConnectionProtocol, QuicStreamHandler
 
 __all__ = ["connect"]
@@ -67,6 +67,7 @@ async def connect(
         addr = ("::ffff:" + addr[0], addr[1], 0, 0)
 
     # prepare QUIC connection
+    # Create connection from configuration
     if configuration is None:
         configuration = QuicConfiguration(is_client=True)
     if configuration.server_name is None:
@@ -79,7 +80,7 @@ async def connect(
     sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
     completed = False
     try:
-        sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)
+        sock.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 0)     # IPv6 only to 0 (false)
         sock.bind((local_host, local_port, 0, 0))
         completed = True
     finally:

@@ -1,0 +1,20 @@
+A listing of the changes that must be made to standard QUIC to enable the use of confidential connections:
+
+1) In client and server files standard sockets must be swapped out for confidential sockets
+
+2) The protocol classes that define callbacks for create_datagram_endpoint must not use the provided transport but use the confidential socket embedded inside the transport.
+
+3) QUIC must allow for a new frame type to be sent in the initial packet: a path frame specifying how to reply.
+a) The client is to send this frame in its initial message
+b) The server is to print this frame
+
+4) A change in the definition of a path for the use in connections and streams. Note paths are not defined for receiving, only sending. The new path is to be defined by:
+a) A client's path to the server is defined by the Layer 3 & 4 addresses on a packet from the client to the server: The false source IP and false source port and the real destination IP and real destination port
+b) A server's path to the client is defined by the layer 3 & 4 addresses on a packet from the server to the client: the false source IP and false source port and the real destination IP and real destination port
+
+5) Update the connection matching code to accept packets for a particular connection based on recv_address not just addr field.
+
+
+Note: Will this affect the new path/trigger path challenge frames? It should if used itermittently with standard QUIC.
+    Extra work will need to be done to handle these cases but this is a proof of concept only meant to show viability.
+    Only a single NetworkPath will be used. The initial path will remain the only path.

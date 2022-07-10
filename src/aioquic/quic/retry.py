@@ -4,8 +4,8 @@ from typing import Tuple
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
-from ..buffer import Buffer
-from ..tls import pull_opaque, push_opaque
+from aioquic.buffer import Buffer
+from aioquic.tls import pull_opaque, push_opaque
 from .connection import NetworkAddress
 
 

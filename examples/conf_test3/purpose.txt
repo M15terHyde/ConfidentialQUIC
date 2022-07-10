@@ -1,0 +1,17 @@
+This test originated from the control_test.
+This code should accomplish goals 1 & 2 in the changes.txt file
+Goal 1 is copied below:
+1) In client and server files standard sockets must be swapped out for confidential sockets
+2) The protocol classes that define callbacks for create_datagram_endpoint must not use the provided transport but use the confidential socket embedded inside the transport.
+
+
+http3_server accepts the conf_server and conf_protocol but
+http3_client can send but does not seem to act on its protocol on receive.
+Remember that conf_socket does indeed receive that was the purpose of test2 in confidentialSocket
+it's only that upon receipt it doesnt seem to act on the QuicConnectionProtocol
+Fix: The conf_client.py bind call needed the real address it was sending from, not a generic '::' all address
+
+
+New issue: Even after the connection close takes place the client still sends 8 packets
+
+June 22 2022AD - Passing

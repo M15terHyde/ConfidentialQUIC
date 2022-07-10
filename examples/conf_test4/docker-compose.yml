@@ -1,0 +1,54 @@
+version: "3.9"
+
+
+# Declare new services
+services:
+  
+  server:
+    build:
+      context: ../..  # Should be aioquic
+      dockerfile: ./examples/conf_test4/server.Dockerfile
+    volumes:
+      - type: volume
+        source: test4qlogs
+        target: /qlogstore
+    networks:
+      test-net:
+        ipv6_address: 2001:db8:1::10
+        aliases:  # set hostname
+          - server
+    ports:
+      - "4433"
+      - "8081" # extra open port for testing
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+  
+  client:
+    build:
+      context: ../..  # Should be aioquic
+      dockerfile: ./examples/conf_test4/client.Dockerfile
+    volumes:
+      - type: volume
+        source: test4qlogs
+        target: /qlogstore
+    networks:
+      test-net:
+        ipv6_address: 2001:db8:1::11
+    ports:
+      - "4433"
+      - "8081" # extra open port for testing
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+
+# Test your service images
+
+
+# Declare new network
+# docker network create --subnet=172.16.2.0/24 --gateway=172.16.2.1 --ipv6 --subnet=2001:db8:1::/64 --opt com.docker.network.bridge.enable_ip_masquerade=true test-net
+networks:
+  test-net:
+    name: test-net
+    external: true
+
+volumes:
+  test4qlogs:

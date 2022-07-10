@@ -3,7 +3,7 @@ from os import PathLike
 from re import split
 from typing import Any, List, Optional, TextIO, Union
 
-from ..tls import (
+from aioquic.tls import (
     CipherSuite,
     SessionTicket,
     load_pem_private_key,

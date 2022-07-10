@@ -2,8 +2,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
-from ..buffer import Buffer, size_uint_var
-from ..tls import Epoch
+from aioquic.buffer import Buffer, size_uint_var
+from aioquic.tls import Epoch
 from .crypto import CryptoPair
 from .logger import QuicLoggerTrace
 from .packet import (

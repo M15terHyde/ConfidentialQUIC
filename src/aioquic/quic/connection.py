@@ -5,10 +5,11 @@ from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 from functools import partial
+from sys import stderr
 from typing import Any, Deque, Dict, FrozenSet, List, Optional, Sequence, Set, Tuple
 
-from .. import tls
-from ..buffer import (
+from aioquic import tls
+from aioquic.buffer import (
     UINT_VAR_MAX,
     UINT_VAR_MAX_SIZE,
     Buffer,
@@ -188,7 +189,9 @@ class QuicConnectionState(Enum):
 
 @dataclass
 class QuicNetworkPath:
-    addr: NetworkAddress
+    addr: NetworkAddress    # destination address and default recv_from address
+    send_as: NetworkAddress | None = None   # source address (optional)
+    recv_from: NetworkAddress | None = None # peer's false L3 address needed to match connection (optional)
     bytes_received: int = 0
     bytes_sent: int = 0
     is_validated: bool = False
@@ -197,6 +200,10 @@ class QuicNetworkPath:
 
     def can_send(self, size: int) -> bool:
         return self.is_validated or (self.bytes_sent + size) <= 3 * self.bytes_received
+    
+    def __post_init__(self):
+        if not self.recv_from:
+            self.recv_from = self.addr
 
 
 @dataclass
@@ -220,18 +227,18 @@ END_STATES = frozenset(
 class QuicConnection:
     """
     A QUIC connection.
-
+    
     The state machine is driven by three kinds of sources:
-
+    
     - the API user requesting data to be send out (see :meth:`connect`,
       :meth:`reset_stream`, :meth:`send_ping`, :meth:`send_datagram_frame`
       and :meth:`send_stream_data`)
     - data being received from the network (see :meth:`receive_datagram`)
     - a timer firing (see :meth:`handle_timer`)
-
+    
     :param configuration: The QUIC configuration to use.
     """
-
+    
     def __init__(
         self,
         *,
@@ -258,11 +265,11 @@ class QuicConnection:
             assert (
                 original_destination_connection_id is not None
             ), "original_destination_connection_id is required for a server"
-
+        
         # configuration
         self._configuration = configuration
         self._is_client = configuration.is_client
-
+        
         self._ack_delay = K_GRANULARITY
         self._close_at: Optional[float] = None
         self._close_event: Optional[events.ConnectionTerminated] = None
@@ -339,24 +346,25 @@ class QuicConnection:
         self._streams_finished: Set[int] = set()
         self._version: Optional[int] = None
         self._version_negotiation_count = 0
-
+        
         if self._is_client:
             self._original_destination_connection_id = self._peer_cid.cid
         else:
             self._original_destination_connection_id = (
                 original_destination_connection_id
             )
-
+        
         # logging
         self._logger = QuicConnectionAdapter(
             logger, {"id": dump_cid(self._original_destination_connection_id)}
         )
+        self._logger.setLevel(logging.DEBUG)
         if configuration.quic_logger:
             self._quic_logger = configuration.quic_logger.start_trace(
                 is_client=configuration.is_client,
                 odcid=self._original_destination_connection_id,
             )
-
+        
         # loss recovery
         self._loss = QuicPacketRecovery(
             initial_rtt=configuration.initial_rtt,
@@ -365,7 +373,7 @@ class QuicConnection:
             send_probe=self._send_probe,
             logger=self._logger,
         )
-
+        
         # things to send
         self._close_pending = False
         self._datagrams_pending: Deque[bytes] = deque()
@@ -374,11 +382,11 @@ class QuicConnection:
         self._probe_pending = False
         self._retire_connection_ids: List[int] = []
         self._streams_blocked_pending = False
-
+        
         # callbacks
         self._session_ticket_fetcher = session_ticket_fetcher
         self._session_ticket_handler = session_ticket_handler
-
+        
         # frame handlers
         self.__frame_handlers = {
             0x00: (self._handle_padding_frame, EPOCHS("IH01")),
@@ -460,16 +468,16 @@ class QuicConnection:
                 reason_phrase=reason_phrase,
             )
             self._close_pending = True
-
-    def connect(self, addr: NetworkAddress, now: float) -> None:
+    
+    def connect(self, addr: NetworkAddress, now: float, send_as: NetworkAddress|None = None, recv_from: NetworkAddress|None = None) -> None:
         """
         Initiate the TLS handshake.
-
+        
         This method can only be called for clients and a single time.
-
+        
         After calling this method call :meth:`datagrams_to_send` to retrieve data
         which needs to be sent.
-
+        
         :param addr: The network address of the remote peer.
         :param now: The current time.
         """
@@ -477,12 +485,13 @@ class QuicConnection:
             self._is_client and not self._connect_called
         ), "connect() can only be called for clients and a single time"
         self._connect_called = True
-
-        self._network_paths = [QuicNetworkPath(addr, is_validated=True)]
+        
+        self._network_paths = [QuicNetworkPath(addr, is_validated=True, send_as=send_as, recv_from=recv_from)] # addr is destination address, validated bc we are the client
         self._version = self._configuration.supported_versions[0]
         self._connect(now=now)
-
-    def datagrams_to_send(self, now: float) -> List[Tuple[bytes, NetworkAddress]]:
+    
+    # NOTE: Encryption of the output happens in this call.
+    def datagrams_to_send(self, now: float) -> List[Tuple[bytes, QuicNetworkPath]]:
         """
         Return a list of `(data, addr)` tuples of datagrams which need to be
         sent, and the network address to which they need to be sent.
@@ -519,7 +528,7 @@ class QuicConnection:
             for epoch, packet_type in epoch_packet_types:
                 crypto = self._cryptos[epoch]
                 if crypto.send.is_valid():
-                    builder.start_packet(packet_type, crypto)
+                    builder.start_packet(packet_type, crypto) # Passes in the CryptoPair that does the encryption
                     self._write_connection_close_frame(
                         builder=builder,
                         epoch=epoch,
@@ -555,8 +564,8 @@ class QuicConnection:
                 self._write_application(builder, network_path, now)
             except QuicPacketBuilderStop:
                 pass
-
-        datagrams, packets = builder.flush()
+        
+        datagrams, packets = builder.flush() # The encryption happens here
 
         if datagrams:
             self._packet_number = builder.packet_number
@@ -601,7 +610,7 @@ class QuicConnection:
         for datagram in datagrams:
             payload_length = len(datagram)
             network_path.bytes_sent += payload_length
-            ret.append((datagram, network_path.addr))
+            ret.append((datagram, network_path))
 
             if self._quic_logger is not None:
                 self._quic_logger.log_event(
@@ -697,6 +706,8 @@ class QuicConnection:
         :param addr: The network address from which the datagram was received.
         :param now: The current time.
         """
+        self._logger.debug(f"connection:receive_datagram from {addr}")
+
         # stop handling packets when closing
         if self._state in END_STATES:
             return
@@ -722,6 +733,7 @@ class QuicConnection:
         if self._close_at is None:
             self._close_at = now + self._configuration.idle_timeout
 
+        # cycle through every packet in the datagram
         buf = Buffer(data=data)
         while not buf.eof():
             start_off = buf.tell()
@@ -856,16 +868,21 @@ class QuicConnection:
                         )
                 return
 
-            network_path = self._find_network_path(addr)
+            #network_path = self._find_network_path(addr)
+            # Finds QuicNetworkPath based on recv_addr
+            # NOTE: Creates path if it does not exist. Handling a ReplyPath Crypto frame will update this network path
+            network_path = self._find_conf_network_path(addr)
 
             # server initialization
             if not self._is_client and self._state == QuicConnectionState.FIRSTFLIGHT:
+                self._logger.debug("Initializing server...")
                 assert (
                     header.packet_type == PACKET_TYPE_INITIAL
                 ), "first packet must be INITIAL"
                 self._network_paths = [network_path]
                 self._version = QuicProtocolVersion(header.version)
                 self._initialize(header.destination_cid)
+                self._logger.debug("...initialized")
 
             # determine crypto and packet space
             epoch = get_epoch(header.packet_type)
@@ -881,6 +898,7 @@ class QuicConnection:
             buf.seek(end_off)
 
             try:
+                self._logger.debug("receive_datagram: Decrypting packet")
                 plain_header, plain_payload, packet_number = crypto.decrypt_packet(
                     data[start_off:end_off], encrypted_off, space.expected_packet_number
                 )
@@ -1001,6 +1019,10 @@ class QuicConnection:
                 )
             if self._state in END_STATES or self._close_pending:
                 return
+
+            # re-gather network_path. It could have be updated from init packets during _payload_received
+            if epoch == tls.Epoch.INITIAL:
+                network_path = self._find_conf_network_path(addr)
 
             # update idle timeout
             self._close_at = now + self._configuration.idle_timeout
@@ -1182,10 +1204,10 @@ class QuicConnection:
         assert self._is_client
 
         self._close_at = now + self._configuration.idle_timeout
-        self._initialize(self._peer_cid.cid)
-
-        self.tls.handle_message(b"", self._crypto_buffers)
-        self._push_crypto_data()
+        self._initialize(self._peer_cid.cid)    # Local TLS init. Sets up streams for each Epoch.
+        # Start TLS handshake
+        self.tls.handle_message(b"", self._crypto_buffers, network_paths = self._network_paths)  # serializes/moves ClientHello into cryptoBuffer[Epoch.Initial]
+        self._push_crypto_data()    # sets the crypto data for init packet to be sent
 
     def _discard_epoch(self, epoch: tls.Epoch) -> None:
         if not self._spaces[epoch].discarded:
@@ -1203,6 +1225,19 @@ class QuicConnection:
         # new network path
         network_path = QuicNetworkPath(addr)
         self._logger.debug("Network path %s discovered", network_path.addr)
+        return network_path
+
+    def _find_conf_network_path(self, addr: NetworkAddress) -> QuicNetworkPath:
+        self._logger.debug("connection:find_conf_network_path")
+        # check existing network paths
+        for idx, network_path in enumerate(self._network_paths):
+            if network_path.recv_from == addr:
+                self._logger.debug(f"Found existing network path: {network_path}")
+                return network_path
+
+        # new network path
+        network_path = QuicNetworkPath(addr)
+        self._logger.debug(f"Network path {network_path} discovered")
         return network_path
 
     def _get_or_create_stream(self, frame_type: int, stream_id: int) -> QuicStream:
@@ -1376,6 +1411,7 @@ class QuicConnection:
                 send_teardown_cb=partial(self._log_key_retired, send_secret_name),
             )
 
+        # CryptoPair is where all our encryption/decryption happens
         self._cryptos = dict(
             (epoch, create_crypto_pair(epoch))
             for epoch in (
@@ -1486,6 +1522,7 @@ class QuicConnection:
         """
         Handle a CRYPTO frame.
         """
+        self._logger.debug("connection::_handle_crypto_frame")
         offset = buf.pull_uint_var()
         length = buf.pull_uint_var()
         if offset + length > UINT_VAR_MAX:
@@ -1507,7 +1544,8 @@ class QuicConnection:
         if event is not None:
             # pass data to TLS layer
             try:
-                self.tls.handle_message(event.data, self._crypto_buffers)
+                self._logger.debug("passing frame to tls.handle_message")
+                self.tls.handle_message(event.data, self._crypto_buffers, network_paths = self._network_paths)
                 self._push_crypto_data()
             except tls.Alert as exc:
                 raise QuicConnectionError(
@@ -2255,6 +2293,7 @@ class QuicConnection:
         """
         Handle a QUIC packet payload.
         """
+        self._logger.debug("connection::_payload_received")
         buf = Buffer(data=plain)
 
         frame_found = False
@@ -2773,7 +2812,7 @@ class QuicConnection:
                 self._write_ack_frame(builder=builder, space=space, now=now)
 
             # CRYPTO
-            if not crypto_stream.sender.buffer_is_empty:
+            while not crypto_stream.sender.buffer_is_empty: # multiple frames to send in first crypto packet. Write them all
                 if self._write_crypto_frame(
                     builder=builder, space=space, stream=crypto_stream
                 ):

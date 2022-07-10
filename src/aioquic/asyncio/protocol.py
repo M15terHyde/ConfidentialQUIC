@@ -1,8 +1,8 @@
 import asyncio
 from typing import Any, Callable, Dict, Optional, Text, Tuple, Union, cast
 
-from ..quic import events
-from ..quic.connection import NetworkAddress, QuicConnection
+from aioquic.quic import events
+from aioquic.quic.connection import NetworkAddress, QuicConnection
 
 QuicConnectionIdHandler = Callable[[bytes], None]
 QuicStreamHandler = Callable[[asyncio.StreamReader, asyncio.StreamWriter], None]
@@ -54,7 +54,6 @@ class QuicConnectionProtocol(asyncio.DatagramProtocol):
     def connect(self, addr: NetworkAddress) -> None:
         """
         Initiate the TLS handshake.
-
         This method can only be called for clients and a single time.
         """
         self._quic.connect(addr, now=self._loop.time())

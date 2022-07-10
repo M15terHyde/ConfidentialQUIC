@@ -5,7 +5,7 @@ import time
 from collections import deque
 from typing import Any, Deque, Dict, List, Optional
 
-from ..h3.events import Headers
+from aioquic.h3.events import Headers
 from .packet import (
     PACKET_TYPE_HANDSHAKE,
     PACKET_TYPE_INITIAL,

@@ -1,0 +1,50 @@
+version: "3.9"
+
+
+# Declare new services
+services:
+  
+  server:
+    build:
+      context: ..
+      dockerfile: ./test2/server.Dockerfile
+    networks:
+      test-net:
+        ipv6_address: 2001:db8:1::10
+    ports:
+      - "8080"
+      - "8081" # extra open port for testing
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+  
+  client:
+    build:
+      context: ..
+      dockerfile: ./test2/client.Dockerfile
+    networks:
+      test-net:
+        ipv6_address: 2001:db8:1::11
+    ports:
+      - "8081" # extra open port for testing
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=0
+
+
+# Declare new networks
+# docker network create --subnet=172.16.2.0/24 --gateway=172.16.2.1 --ipv6 --subnet=2001:db8:1::/64 --opt com.docker.network.bridge.enable_ip_masquerade=true test1-net
+networks:
+#  test1-net:
+#    name: test1-net
+#    driver: bridge
+#    driver_opts:
+#      com.docker.network.enable_ipv6: "true"
+#    external: false
+#    ipam:
+#      driver: default
+#      config:
+#        - subnet: 2001:db8:1::/64
+#          gateway: 2001:db8:1::1
+  test-net:
+    name: test-net   # We'll reuse this one for test2 as well
+    external: true
+
