@@ -4,3 +4,5 @@ Goal 3 is copied below:
 3) QUIC must allow for a new frame type to be sent in the initial packet: a path frame specifying how to reply.
 a) The client is to send this frame in its initial message
 b) The server is to print this frame
+
+2020_07_10

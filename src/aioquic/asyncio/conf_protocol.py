@@ -105,6 +105,7 @@ class QuicConnectionProtocol(asyncio.DatagramProtocol):
 
         # send datagrams
         for data, network_path in self._quic.datagrams_to_send(now=self._loop.time()):
+            print(f"conf_protocol:transmit sendto={network_path.addr}\nsendas={network_path.send_as}", file=stderr)
             self._sock.sendto(data, network_path.addr, source_address=network_path.send_as)
 
         # re-arm timer
@@ -151,6 +152,7 @@ class QuicConnectionProtocol(asyncio.DatagramProtocol):
 
         Reimplement this in your subclass to handle the events.
         """
+        print(f"conf_protocol:quic_event_received", file=stderr)
         # FIXME: move this to a subclass
         if isinstance(event, events.ConnectionTerminated):
             for reader in self._stream_readers.values():

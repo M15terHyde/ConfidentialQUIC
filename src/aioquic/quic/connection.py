@@ -504,6 +504,7 @@ class QuicConnection:
         network_path = self._network_paths[0]
 
         if self._state in END_STATES:
+            self._logger.debug("connection::datagrams_to_send returning 0 datagrams")
             return []
 
         # build datagrams
@@ -626,6 +627,7 @@ class QuicConnection:
                         ],
                     },
                 )
+        self._logger.debug(f"connection::datagrams_to_send returning {len(ret)} datagrams")
         return ret
 
     def get_next_available_stream_id(self, is_unidirectional=False) -> int:
@@ -706,7 +708,7 @@ class QuicConnection:
         :param addr: The network address from which the datagram was received.
         :param now: The current time.
         """
-        self._logger.debug(f"connection:receive_datagram from {addr}")
+        #self._logger.debug(f"connection:receive_datagram from {addr}")
 
         # stop handling packets when closing
         if self._state in END_STATES:
@@ -898,7 +900,7 @@ class QuicConnection:
             buf.seek(end_off)
 
             try:
-                self._logger.debug("receive_datagram: Decrypting packet")
+                #self._logger.debug("receive_datagram: Decrypting packet")
                 plain_header, plain_payload, packet_number = crypto.decrypt_packet(
                     data[start_off:end_off], encrypted_off, space.expected_packet_number
                 )
@@ -1022,6 +1024,7 @@ class QuicConnection:
 
             # re-gather network_path. It could have be updated from init packets during _payload_received
             if epoch == tls.Epoch.INITIAL:
+                #self._logger.debug("connection:receive_datagram network_path second check")
                 network_path = self._find_conf_network_path(addr)
 
             # update idle timeout
@@ -2379,6 +2382,7 @@ class QuicConnection:
         self._retire_connection_ids.append(connection_id.sequence_number)
 
     def _push_crypto_data(self) -> None:
+        self._logger.debug("connection:_push_crypto_data")
         for epoch, buf in self._crypto_buffers.items():
             self._crypto_streams[epoch].sender.write(buf.data)
             buf.seek(0)
@@ -2812,7 +2816,7 @@ class QuicConnection:
                 self._write_ack_frame(builder=builder, space=space, now=now)
 
             # CRYPTO
-            while not crypto_stream.sender.buffer_is_empty: # multiple frames to send in first crypto packet. Write them all
+            if not crypto_stream.sender.buffer_is_empty: # multiple frames to send in first crypto packet. Write them all
                 if self._write_crypto_frame(
                     builder=builder, space=space, stream=crypto_stream
                 ):

@@ -1339,6 +1339,7 @@ class Context:
 
             elif self.state == State.SERVER_EXPECT_CLIENT_HELLO:
                 if message_type == HandshakeType.CLIENT_HELLO:
+                    self.__logger.debug("tls:handle_message Server got CLIENT_HELLO in CRYPTO frame")
                     self._server_handle_hello(
                         input_buf,
                         output_buf[Epoch.INITIAL],
@@ -1346,6 +1347,7 @@ class Context:
                         output_buf[Epoch.ONE_RTT],
                     )
                 elif message_type == HandshakeType.REPLY_PATH:
+                    self.__logger.debug("tls:handle_message Server got REPLY_PATH in CRYPTO frame")
                     self._server_handle_reply_path(
                         input_buf,
                         network_paths,
@@ -1552,12 +1554,12 @@ class Context:
         path = ReplyPath(
                 peer_real_addr=reply_path.addr[0],
                 peer_real_port=reply_path.addr[1],
-                send_as_addr=reply_path.send_as[0],
-                send_as_port=reply_path.send_as[1],
-                recv_from_addr=reply_path.recv_from[0],
-                recv_from_port=reply_path.recv_from[1]
+                send_as_addr=reply_path.recv_from[0],   # server sends as client's receive_from
+                send_as_port=reply_path.recv_from[1],
+                recv_from_addr=reply_path.send_as[0],   # server receives from client send_as
+                recv_from_port=reply_path.send_as[1]
             )
-        self.__logger.debug(f"_client_send_reply_path: path: {path}")
+        self.__logger.debug(f"tls:_client_send_reply_path: path: {path}")
 
         with push_message(self._key_schedule_proxy, output_buf):
             push_reply_path(output_buf, path)

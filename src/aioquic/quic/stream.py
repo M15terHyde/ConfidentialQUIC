@@ -202,7 +202,7 @@ class QuicStreamSender:
         """
         # get the first pending data range
         try:
-            r = self._pending[0]
+            r = self._pending[0]#.shift()#[0]
         except IndexError:
             if self._pending_eof:
                 # FIN only
