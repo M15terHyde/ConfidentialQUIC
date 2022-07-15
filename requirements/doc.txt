@@ -7,3 +7,4 @@ pyopenssl
 httpbin
 asgiref
 starlette
+typing_extensions

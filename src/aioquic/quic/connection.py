@@ -708,8 +708,6 @@ class QuicConnection:
         :param addr: The network address from which the datagram was received.
         :param now: The current time.
         """
-        #self._logger.debug(f"connection:receive_datagram from {addr}")
-
         # stop handling packets when closing
         if self._state in END_STATES:
             return
@@ -873,6 +871,7 @@ class QuicConnection:
             #network_path = self._find_network_path(addr)
             # Finds QuicNetworkPath based on recv_addr
             # NOTE: Creates path if it does not exist. Handling a ReplyPath Crypto frame will update this network path
+            self._logger.debug("connection:receive_datagram first network path check")
             network_path = self._find_conf_network_path(addr)
 
             # server initialization
@@ -900,7 +899,6 @@ class QuicConnection:
             buf.seek(end_off)
 
             try:
-                #self._logger.debug("receive_datagram: Decrypting packet")
                 plain_header, plain_payload, packet_number = crypto.decrypt_packet(
                     data[start_off:end_off], encrypted_off, space.expected_packet_number
                 )
@@ -1009,6 +1007,7 @@ class QuicConnection:
                 time=now,
             )
             try:
+                print("connection:receive_datagram handling the payload", file=stderr)
                 is_ack_eliciting, is_probing = self._payload_received(
                     context, plain_payload
                 )
@@ -1544,6 +1543,7 @@ class QuicConnection:
 
         stream = self._crypto_streams[context.epoch]
         event = stream.receiver.handle_frame(frame)
+        self._logger.debug(f"event received from handle_frame length= {len(event.data) if event else None}")
         if event is not None:
             # pass data to TLS layer
             try:
@@ -2325,6 +2325,7 @@ class QuicConnection:
 
             # handle the frame
             try:
+                self._logger.debug(f"Calling frame_handler for frame_type={frame_type}")
                 frame_handler(context, frame_type, buf)
             except BufferReadError:
                 raise QuicConnectionError(
@@ -2382,7 +2383,6 @@ class QuicConnection:
         self._retire_connection_ids.append(connection_id.sequence_number)
 
     def _push_crypto_data(self) -> None:
-        self._logger.debug("connection:_push_crypto_data")
         for epoch, buf in self._crypto_buffers.items():
             self._crypto_streams[epoch].sender.write(buf.data)
             buf.seek(0)

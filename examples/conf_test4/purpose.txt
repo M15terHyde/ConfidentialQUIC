@@ -5,4 +5,6 @@ Goal 3 is copied below:
 a) The client is to send this frame in its initial message
 b) The server is to print this frame
 
-2020_07_10
+2020_07_13
+Frames are being sent but has wrong format and so is being rejected.
+Need to place length of data in 3 bytes before ReplyPath

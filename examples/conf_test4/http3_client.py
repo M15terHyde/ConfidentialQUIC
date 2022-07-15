@@ -355,6 +355,10 @@ async def run(
     output_dir: Optional[str],
     local_port: int,
     zero_rtt: bool,
+    send_as_ipv6: str,
+    send_as_port: int,
+    recv_from_ipv6: str,
+    recv_from_port: int,
 ) -> None:
     # parse URL
     parsed = urlparse(urls[0])
@@ -395,6 +399,10 @@ async def run(
         session_ticket_handler=save_session_ticket,
         local_port=local_port,
         wait_connected=not zero_rtt,
+        send_as_ipv6=send_as_ipv6,
+        send_as_port=send_as_port,
+        recv_from_ipv6=recv_from_ipv6,
+        recv_from_port=recv_from_port,
     ) as client:
         client = cast(HttpClient, client)
 
@@ -556,5 +564,9 @@ if __name__ == "__main__":
             output_dir=args.output_dir,
             local_port=args.local_port,
             zero_rtt=args.zero_rtt,
+            send_as_ipv6='2001:4860:4860::8888',
+            send_as_port=9999,
+            recv_from_ipv6='2001:4860:4860::8844',
+            recv_from_port=9999,
         )
     )
