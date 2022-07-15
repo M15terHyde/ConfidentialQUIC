@@ -1569,8 +1569,8 @@ class Context:
         reply_path = cast(QuicNetworkPath, reply_path)
         
         path = ReplyPath(
-                peer_real_addr=IPv6Address(reply_path.addr[0]),
-                peer_real_port=reply_path.addr[1],
+                peer_real_addr=IPv6Address(reply_path.self_addr[0]),
+                peer_real_port=reply_path.self_addr[1],
                 send_as_addr=IPv6Address(reply_path.recv_from[0]),   # server sends as client's receive_from
                 send_as_port=reply_path.recv_from[1],
                 recv_from_addr=IPv6Address(reply_path.send_as[0]),   # server receives from client send_as
@@ -1591,9 +1591,9 @@ class Context:
         
         # convert to QuicNetworkPath
         new_path = QuicNetworkPath(
-            addr = ( peer_reply_path.peer_real_addr.exploded, peer_reply_path.peer_real_port, 0, 0 ),
-            send_as = ( peer_reply_path.send_as_addr.exploded, peer_reply_path.send_as_port, 0, 0),
-            recv_from = ( peer_reply_path.recv_from_addr.exploded, peer_reply_path.recv_from_port, 0, 0)
+            addr = ( peer_reply_path.peer_real_addr.compressed, peer_reply_path.peer_real_port, 0, 0 ),
+            send_as = ( peer_reply_path.send_as_addr.compressed, peer_reply_path.send_as_port, 0, 0),
+            recv_from = ( peer_reply_path.recv_from_addr.compressed, peer_reply_path.recv_from_port, 0, 0)
         )
 
         # find the existing default path with confidential one

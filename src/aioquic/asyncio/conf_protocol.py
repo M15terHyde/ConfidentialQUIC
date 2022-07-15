@@ -56,13 +56,13 @@ class QuicConnectionProtocol(asyncio.DatagramProtocol):
 
     # peer_addr: real address to send to
     # recv_from: peer's false address we'll watch for packets from. Peer needs to send_as this address
-    def connect(self, peer_addr: NetworkAddress, send_as: NetworkAddress|None = None, recv_from: NetworkAddress|None = None) -> None:
+    def connect(self, peer_addr: NetworkAddress, self_addr: NetworkAddress|None, send_as: NetworkAddress|None = None, recv_from: NetworkAddress|None = None) -> None:
         """
         Initiate the TLS handshake.
 
         This method can only be called for clients and a single time.
         """
-        self._quic.connect(peer_addr, now=self._loop.time(), send_as=send_as, recv_from=recv_from)
+        self._quic.connect(peer_addr, now=self._loop.time(), self_addr=self_addr, send_as=send_as, recv_from=recv_from)
         self.transmit()
 
     async def create_stream(

@@ -123,7 +123,7 @@ async def connect(
     protocol = cast(QuicConnectionProtocol, protocol)
     try:
         print(f"conf_client connecting to {addr}\n as {send_as} and recv_from: {recv_from}", file=stderr)
-        protocol.connect(addr, send_as=send_as, recv_from=recv_from)  # addr is destination address
+        protocol.connect(addr, self_addr=bind_addr, send_as=send_as, recv_from=recv_from)  # addr is destination address
         if wait_connected:
             await protocol.wait_connected()
         yield protocol

@@ -190,6 +190,7 @@ class QuicConnectionState(Enum):
 @dataclass
 class QuicNetworkPath:
     addr: NetworkAddress    # destination address and default recv_from address
+    self_addr: NetworkAddress | None = None # Address we are listening on
     send_as: NetworkAddress | None = None   # source address (optional)
     recv_from: NetworkAddress | None = None # peer's false L3 address needed to match connection (optional)
     bytes_received: int = 0
@@ -469,7 +470,7 @@ class QuicConnection:
             )
             self._close_pending = True
     
-    def connect(self, addr: NetworkAddress, now: float, send_as: NetworkAddress|None = None, recv_from: NetworkAddress|None = None) -> None:
+    def connect(self, addr: NetworkAddress, now: float, self_addr: NetworkAddress|None, send_as: NetworkAddress|None = None, recv_from: NetworkAddress|None = None) -> None:
         """
         Initiate the TLS handshake.
         
@@ -486,7 +487,7 @@ class QuicConnection:
         ), "connect() can only be called for clients and a single time"
         self._connect_called = True
         
-        self._network_paths = [QuicNetworkPath(addr, is_validated=True, send_as=send_as, recv_from=recv_from)] # addr is destination address, validated bc we are the client
+        self._network_paths = [QuicNetworkPath(addr, is_validated=True, self_addr=self_addr, send_as=send_as, recv_from=recv_from)] # addr is destination address, validated bc we are the client
         self._version = self._configuration.supported_versions[0]
         self._connect(now=now)
     
