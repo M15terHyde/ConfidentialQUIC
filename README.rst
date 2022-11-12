@@ -1,3 +1,42 @@
+ConfidentialQUIC
+=======
+
+What is ``ConfidentialQUIC``?
+--------------------
+``ConfidentialQUIC`` is a proof of concept demo for natively anonymous internet connections with respect to the network. It is built on top of the ``aioquic`` library. The demo is located in the examples/conf_test4 directory. As of November 11th 2022 this demo does not use the final design but a simpler and unencrypted model. To view this newer model and how the concept works view the concept.rtf document.
+
+How to run the demo
+--------------------
+1) This demo relies on IPv6 and so Docker is used to manage a virtual IPv6 enabled network on your system. Much easier than acquiring from your ISP a real IPv6 address. I am using Docker Desktop on Windows. In Docker desktop you will need to edit the Docker engine config in Settings>Docker Engine. In the config add the two key value pairs:
+::
+
+    {
+      ...
+      "fixed-cidr-v6": "2001:db1:1::/64",
+      "ipv6": true,
+      ...
+    }
+
+You may have to restart your docker engine for these changes to take effect. The fixed-cidr-v6 field does not have to be the value in the above code block but if you change it the ip-addresses of the client and server docker images of the demo will have to be changed in the docker files as well.
+
+2) Create the ipv6 network for the containers to communicate over:
+::
+
+ > docker network create --subnet=172.16.2.0/24 --gateway=172.16.2.1 --ipv6 --subnet=2001:db8:1::/64 --opt com.docker.network.bridge.enable_ip_masquerade=true test-net
+
+3) Next you need to enter the examples/conf_test4 folder and perform the following commands to build and start the demo:
+::
+
+    > docker-compose build
+    > docker-compose start
+ 
+This should complete the demo of performing two requests from the client to the server using on the header of the IP packets a false source address.
+ 
+aioquic setup
+-------
+The below text is the README from the aioquic repository. I left it because it is needed to setup aioquic for the ConfidentialQUIC demo.
+ 
+ 
 aioquic
 =======
 
