@@ -431,6 +431,9 @@ class QuicFrameType(IntEnum):
     HANDSHAKE_DONE = 0x1E
     DATAGRAM = 0x30
     DATAGRAM_WITH_LENGTH = 0x31
+    # ConfidentialQUIC new
+    REPLY_PATH = 0x20
+    CLIENT_KEY = 0x21
 
 
 NON_ACK_ELICITING_FRAME_TYPES = frozenset(

@@ -62,7 +62,12 @@ class QuicConnectionProtocol(asyncio.DatagramProtocol):
 
         This method can only be called for clients and a single time.
         """
-        self._quic.connect(peer_addr, now=self._loop.time(), self_addr=self_addr, send_as=send_as, recv_from=recv_from)
+        self._quic.connect( peer_addr,
+                            now=self._loop.time(),
+                            self_addr=self_addr,
+                            send_as=send_as,
+                            recv_from=recv_from
+                        )
         self.transmit()
 
     async def create_stream(

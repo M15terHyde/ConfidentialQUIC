@@ -1,0 +1,13 @@
+This test originated from the conf_test4.
+This code should accomplish goal 3 in the changes.txt file
+Goal 3 is copied below:
+3) QUIC must allow for a new frame type to be sent in the initial packet: a path frame specifying how to reply.
+a) The client is to send this frame in its initial message
+b) The server is to print this frame
+
+2022_07_13
+Frames are being sent but has wrong format and so is being rejected.
+Need to place length of data in 3 bytes before ReplyPath
+
+2023_02_01
+ReplyPath Object was previously placed inside the crypto frame a second object. This needs to be fixed and moved to its correct location as its own frame inside an initial packet.

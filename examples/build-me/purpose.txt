@@ -1,0 +1,2 @@
+This folder's purpose is to provide a baseline image build of the required support packages/modules to speed
+up testing/development/debugging because for some reason building this image has jumped to over 11 minutes.

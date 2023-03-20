@@ -1,0 +1,1 @@
+docker build -f examples/build-me/Dockerfile --tag conf-quic-base:latest ../..

@@ -1,6 +1,4 @@
 import datetime
-from ipaddress import IPv6Address
-from sys import stderr
 import logging
 import os
 import ssl
@@ -20,9 +18,7 @@ from typing import (
     Tuple,
     TypeVar,
     Union,
-    cast
 )
-from typing_extensions import Self
 
 import certifi
 from cryptography import x509
@@ -44,9 +40,6 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from OpenSSL import crypto
 
 from .buffer import Buffer
-
-# Causes circular imports
-#from .quic.connection import QuicNetworkPath
 
 TLS_VERSION_1_2 = 0x0303
 TLS_VERSION_1_3 = 0x0304
@@ -271,6 +264,13 @@ class CipherSuite(IntEnum):
     EMPTY_RENEGOTIATION_INFO_SCSV = 0x00FF
 
 
+CIPHER_KEY_LENGTHS = {
+    CipherSuite.AES_128_GCM_SHA256: 128>>3,
+    CipherSuite.AES_256_GCM_SHA384: 256>>3,
+    CipherSuite.CHACHA20_POLY1305_SHA256: 256>>3,
+}
+
+
 class CompressionMethod(IntEnum):
     NULL = 0
 
@@ -314,7 +314,6 @@ class HandshakeType(IntEnum):
     FINISHED = 20
     KEY_UPDATE = 24
     COMPRESSED_CERTIFICATE = 25
-    REPLY_PATH = 26
     MESSAGE_HASH = 254
 
 
@@ -629,63 +628,6 @@ def push_client_hello(buf: Buffer, hello: ClientHello) -> None:
                         partial(push_psk_binder, buf),
                         hello.pre_shared_key.binders,
                     )
-
-
-@dataclass
-class ReplyPath:
-    # Server will reply to
-    peer_real_addr: IPv6Address | None = None
-    peer_real_port: int = 0
-    # Server will reply as
-    send_as_addr: IPv6Address | None = None
-    send_as_port: int = 0
-    # Packets received from this address will be reply to at peer_real
-    recv_from_addr: IPv6Address | None = None
-    recv_from_port: int = 0
-
-    def from_bytes(self, buf: bytes) -> Self:
-        assert len(buf) == 54
-        self.peer_real_addr = IPv6Address(buf[0:16])
-        self.peer_real_port = int().from_bytes(buf[16:18], byteorder='big')
-        self.send_as_addr = IPv6Address(buf[18:34])
-        self.send_as_port = int().from_bytes(buf[34:36], byteorder='big')
-        self.recv_from_addr = IPv6Address(buf[36:52])
-        self.recv_from_port = int().from_bytes(buf[52:54], byteorder='big')
-        return self
-
-    def to_bytes(self) -> bytes:
-        ret = bytearray()
-        # peer_real
-        ret.extend(self.peer_real_addr.packed)
-        ret.extend(self.peer_real_port.to_bytes(2,"big"))
-        # send_as
-        ret.extend(self.send_as_addr.packed)
-        ret.extend(self.send_as_port.to_bytes(2,"big"))
-        # recv_from
-        ret.extend(self.recv_from_addr.packed)
-        ret.extend(self.recv_from_port.to_bytes(2,"big"))
-        return bytes(ret)
-
-
-def pull_reply_path(buf: Buffer) -> ReplyPath:
-    # type
-    assert buf.pull_uint8() == HandshakeType.REPLY_PATH
-    # length
-    msg_len = int.from_bytes(buf.pull_bytes(3), byteorder='big')
-    # message
-    return ReplyPath().from_bytes(buf.pull_bytes(msg_len))
-
-
-def push_reply_path(buf: Buffer, reply_path: ReplyPath) -> None:
-    msg_bytes = reply_path.to_bytes()
-    msg_len = len(msg_bytes)
-    # type
-    buf.push_uint8(HandshakeType.REPLY_PATH)
-    # length
-    buf.push_bytes(msg_len.to_bytes(length=3, byteorder='big'))
-    # message
-    buf.push_bytes(msg_bytes)
-
 
 
 @dataclass
@@ -1272,41 +1214,22 @@ class Context:
         """
         return self._session_resumed
 
-    # Connection passes in it's network paths to be appended to,
-    # If ability not desired, don't pass it in the default empty list will still be appended to
-    # but the result just wont go anywhere
     def handle_message(
-        self, input_data: bytes, output_buf: Dict[Epoch, Buffer], network_paths = []
+        self, input_data: bytes, output_buf: Dict[Epoch, Buffer]
     ) -> None:
-        print(f"tls:handle_message state={self.state}\tlen(input_data)={len(input_data)}", file=stderr)
-        # Fix circular imports
-        from .quic.connection import QuicNetworkPath
-        network_paths = cast(List[QuicNetworkPath], network_paths)
-
         if self.state == State.CLIENT_HANDSHAKE_START:
-            # Place ReplyPath frame into the Initial Packet buffer.
-            # It should be the first frame for easier recipient processing
-            if( 
-                network_paths
-                and network_paths[0].send_as    # is a confidential path
-            ):
-                self._client_send_reply_path(output_buf[Epoch.INITIAL], network_paths[0])
-            # place ClientHello frame into Initial Packet buffer 
-            self._client_send_hello(output_buf[Epoch.INITIAL]) # updates state to CLIENT_EXPECT_SERVER_HELLO
-            
+            self._client_send_hello(output_buf[Epoch.INITIAL])
             return
 
         self._receive_buffer += input_data
         while len(self._receive_buffer) >= 4:
-            print("determining message length", file=stderr)
             # determine message length
             message_type = self._receive_buffer[0]
             message_length = 0
             for b in self._receive_buffer[1:4]:
-                message_length = (message_length << 8) | b  # create space for b and append b
+                message_length = (message_length << 8) | b
             message_length += 4
 
-            print("checking message is complete", file=stderr)
             # check message is complete
             if len(self._receive_buffer) < message_length:
                 break
@@ -1316,7 +1239,7 @@ class Context:
             input_buf = Buffer(data=message)
 
             # client states
-            print("Begin checking states", file=stderr)
+
             if self.state == State.CLIENT_EXPECT_SERVER_HELLO:
                 if message_type == HandshakeType.SERVER_HELLO:
                     self._client_handle_hello(input_buf, output_buf[Epoch.INITIAL])
@@ -1352,22 +1275,12 @@ class Context:
             # server states
 
             elif self.state == State.SERVER_EXPECT_CLIENT_HELLO:
-                print("Handling state State.SERVER_EXPECT_CLIENT_HELLO", file=stderr)
                 if message_type == HandshakeType.CLIENT_HELLO:
-                    print("tls:handle_message Server got CLIENT_HELLO in CRYPTO frame", file=stderr)
-                    self.__logger.debug("tls:handle_message Server got CLIENT_HELLO in CRYPTO frame")
                     self._server_handle_hello(
                         input_buf,
                         output_buf[Epoch.INITIAL],
                         output_buf[Epoch.HANDSHAKE],
                         output_buf[Epoch.ONE_RTT],
-                    )
-                elif message_type == HandshakeType.REPLY_PATH:
-                    print("tls:handle_message Server got REPLY_PATH in CRYPTO frame", file=stderr)
-                    self.__logger.debug("tls:handle_message Server got REPLY_PATH in CRYPTO frame")
-                    self._server_handle_reply_path(
-                        input_buf,
-                        network_paths,
                     )
                 else:
                     raise AlertUnexpectedMessage
@@ -1408,11 +1321,9 @@ class Context:
         )
 
     def _client_send_hello(self, output_buf: Buffer) -> None:
-        if self.__logger: self.__logger.debug("tls:_client_send_hello")
-
         key_share: List[KeyShareEntry] = []
         supported_groups: List[int] = []
-        # Generate keys
+
         for group in self._supported_groups:
             if group == Group.SECP256R1:
                 self._ec_private_key = ec.generate_private_key(
@@ -1502,8 +1413,6 @@ class Context:
         self._set_state(State.CLIENT_EXPECT_SERVER_HELLO)
 
     def _client_handle_hello(self, input_buf: Buffer, output_buf: Buffer) -> None:
-        if self.__logger: self.__logger.debug("tls:_client_handle_hello")
-        
         peer_hello = pull_server_hello(input_buf)
 
         cipher_suite = negotiate(
@@ -1559,62 +1468,6 @@ class Context:
         )
 
         self._set_state(State.CLIENT_EXPECT_ENCRYPTED_EXTENSIONS)
-    
-
-    def _client_send_reply_path(self, output_buf: Buffer, reply_path ) -> None:
-        if self.__logger: self.__logger.debug("tls:_client_send_reply_path")
-        
-        # Fix circular imports
-        from .quic.connection import QuicNetworkPath
-        reply_path = cast(QuicNetworkPath, reply_path)
-        
-        path = ReplyPath(
-                peer_real_addr=IPv6Address(reply_path.self_addr[0]),
-                peer_real_port=reply_path.self_addr[1],
-                send_as_addr=IPv6Address(reply_path.recv_from[0]),   # server sends as client's receive_from
-                send_as_port=reply_path.recv_from[1],
-                recv_from_addr=IPv6Address(reply_path.send_as[0]),   # server receives from client send_as
-                recv_from_port=reply_path.send_as[1]
-            )
-        self.__logger.debug(f"tls:_client_send_reply_path: path: {path}")
-        push_reply_path(output_buf, path)
-
-    def _server_handle_reply_path(self, input_buf: Buffer, network_paths) -> None:
-        if self.__logger: self.__logger.debug("tls:_server_handle_reply_path")
-
-        # Fix circular imports
-        from .quic.connection import QuicNetworkPath
-        network_paths = cast(List[QuicNetworkPath], network_paths)
-
-        peer_reply_path = pull_reply_path(input_buf)
-        self.__logger.debug(f"_server_handle_reply_path: path: {peer_reply_path}")
-        
-        # convert to QuicNetworkPath
-        new_path = QuicNetworkPath(
-            addr = ( peer_reply_path.peer_real_addr.compressed, peer_reply_path.peer_real_port, 0, 0 ),
-            send_as = ( peer_reply_path.send_as_addr.compressed, peer_reply_path.send_as_port, 0, 0),
-            recv_from = ( peer_reply_path.recv_from_addr.compressed, peer_reply_path.recv_from_port, 0, 0)
-        )
-
-        # find the existing default path with confidential one
-        idx = None
-        old_path = None
-        for i, path in enumerate(network_paths):
-            if (
-                path.addr == path.recv_from # isn't confidential (default)
-                and path.addr == new_path.recv_from
-            ):
-                idx = i
-                old_path = path
-        
-        # replace
-        if idx is not None:
-            self.__logger.info(f"Replacing NetworkPath: {old_path} wtih \nnew NetworkPath: {new_path}")
-            network_paths[idx] = new_path
-        else:
-            self.__logger.info(f"Appending new NetworkPath: {new_path}")
-            network_paths.append(new_path)
-
 
     def _client_handle_encrypted_extensions(self, input_buf: Buffer) -> None:
         encrypted_extensions = pull_encrypted_extensions(input_buf)

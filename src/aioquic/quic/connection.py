@@ -6,7 +6,9 @@ from dataclasses import dataclass
 from enum import Enum
 from functools import partial
 from sys import stderr
-from typing import Any, Deque, Dict, FrozenSet, List, Optional, Sequence, Set, Tuple
+from typing import Any, Deque, Dict, FrozenSet, List, Optional, Sequence, Set, Tuple, ClassVar
+from ipaddress import IPv6Address, IPv4Address, ip_address
+from typing_extensions import Self
 
 from aioquic import tls
 from aioquic.buffer import (
@@ -189,10 +191,16 @@ class QuicConnectionState(Enum):
 
 @dataclass
 class QuicNetworkPath:
+    # correct items
     addr: NetworkAddress    # destination address and default recv_from address
+    peer_destination_id: bytes | None = None
     self_addr: NetworkAddress | None = None # Address we are listening on
+    # sending false source
     send_as: NetworkAddress | None = None   # source address (optional)
+    send_as_conn_id: bytes = None
+    # receiving false source
     recv_from: NetworkAddress | None = None # peer's false L3 address needed to match connection (optional)
+    recv_from_conn_id: bytes = None
     bytes_received: int = 0
     bytes_sent: int = 0
     is_validated: bool = False
@@ -214,6 +222,349 @@ class QuicReceiveContext:
     network_path: QuicNetworkPath
     quic_logger_frames: Optional[List[Any]]
     time: float
+
+
+@dataclass
+class ReplyPath:
+    LENGTH: ClassVar[int] = 54
+    # Server will reply to
+    peer_real_addr: IPv6Address | None = None
+    peer_real_port: int = 0
+    # Server will reply as
+    send_as_addr: IPv6Address | None = None
+    send_as_port: int = 0
+    # Packets received from this address will be reply to at peer_real
+    recv_from_addr: IPv6Address | None = None
+    recv_from_port: int = 0
+
+    def __init__(self, obj = None) -> None:
+        if isinstance(obj, (bytes,bytearray)):
+            self.from_bytes(obj)
+
+    def from_bytes(self, buf: bytes) -> Self:
+        assert len(buf) == self.LENGTH
+        self.peer_real_addr = IPv6Address(buf[0:16])
+        self.peer_real_port = int().from_bytes(buf[16:18], byteorder='big')
+        self.send_as_addr = IPv6Address(buf[18:34])
+        self.send_as_port = int().from_bytes(buf[34:36], byteorder='big')
+        self.recv_from_addr = IPv6Address(buf[36:52])
+        self.recv_from_port = int().from_bytes(buf[52:54], byteorder='big')
+        return self
+
+    def to_bytes(self) -> bytes:
+        ret = bytearray()
+        # peer_real
+        ret.extend(self.peer_real_addr.packed)
+        ret.extend(self.peer_real_port.to_bytes(2,"big"))
+        # send_as
+        ret.extend(self.send_as_addr.packed)
+        ret.extend(self.send_as_port.to_bytes(2,"big"))
+        # recv_from
+        ret.extend(self.recv_from_addr.packed)
+        ret.extend(self.recv_from_port.to_bytes(2,"big"))
+        return bytes(ret)
+    
+    def to_QuicNetworkPath(self) -> QuicNetworkPath:
+        return QuicNetworkPath(
+            addr = ( self.peer_real_addr.compressed, self.peer_real_port, 0, 0 ),
+            self_addr = None, # caller will need to fill this out on their own from connection properties
+            send_as = ( self.send_as_addr.compressed, self.send_as_port, 0, 0),
+            recv_from = ( self.recv_from_addr.compressed, self.recv_from_port, 0, 0),
+        )
+    
+    # generates a ReplyPath to send to the peer. Values must be valid from the peer's perspective.
+    def prep_to_send_from_QuicNetworkPath(self, qnp: QuicNetworkPath) -> Self:
+        # the server's peer addres is our own address
+        self.peer_real_addr=IPv6Address(qnp.self_addr[0])
+        self.peer_real_port=qnp.self_addr[1]
+        # the server must send_as who we receive_from
+        self.send_as_addr=IPv6Address(qnp.recv_from[0])
+        self.send_as_port=qnp.recv_from[1]
+        # The server must receive_from the address we send_as
+        self.recv_from_addr=IPv6Address(qnp.send_as[0])
+        self.recv_from_port=qnp.send_as[1]
+        return self
+
+
+@dataclass
+class ReplyPathV2:
+    # fields present
+    fields_present: bytes = 0x00
+    SOURCE_IP_POSITION                      = 0b10000000
+    SOURCE_PORT_POSITION                    = 0b01000000
+    SOURCE_CONNECTION_ID_POSITION           = 0b00100000
+    REPLY_AS_SOURCE_IP_POSITION             = 0b00010000
+    REPLY_AS_SOURCE_PORT_POSITION           = 0b00001000
+    REPLY_AS_SOURCE_CONNECTION_ID_POSITION  = 0b00000100
+    RECEIVE_FROM_SOURCE_IP_POSITION         = 0b00000010
+    RECEIVE_FROM_SOURCE_PORT_POSITION       = 0b00000001
+    # Sender of the ReplyPath's info
+    peer_real_addr: IPv6Address | None = None
+    peer_real_port: int | None = None
+    peer_real_connection_id: bytes | None = None
+    # Sender instructed receiver to use these:
+    send_as_addr: IPv6Address | None = None
+    send_as_port: int | None = None
+    send_as_source_connection_id: bytes | None = None
+    # Receiver should expect to receive from (useful in identifying which network path to modify from new ReplyPath)
+    recv_from_addr: IPv6Address | None = None
+    recv_from_port: int | None = None
+    #
+    _logger: QuicConnectionAdapter| None = None
+
+    def __init__(self, obj: Buffer|None = None, logger: QuicConnectionAdapter|None = None) -> None:
+        if logger:
+            self._logger = logger
+        if(isinstance(obj, Buffer)):
+            self.from_buffer(buf=obj)
+
+    def from_buffer(self, buf: Buffer) -> None:
+        self.fields_present = buf.pull_uint8()
+        if self._logger: self._logger.debug(f"First byte INT: {self.fields_present}\t HEX:{self.fields_present.to_bytes(1,'big')}")
+
+        # source ip field
+        if(self.fields_present & self.SOURCE_IP_POSITION):
+            ip_version = buf.pull_uint8()
+            ip_bytes_length: int = 0
+            if(ip_version == 4):
+                ip_bytes_length = 4
+            elif(ip_version == 6):
+                ip_bytes_length = 16
+            
+            ip_bytes = buf.pull_bytes(ip_bytes_length)
+            self.peer_real_addr = IPv6Address(ip_bytes)
+        
+        # source port field
+        if(self.fields_present & self.SOURCE_PORT_POSITION):
+            self.peer_real_port = int.from_bytes(buf.pull_bytes(2), "big")
+        
+        # source connection id field
+        if(self.fields_present & self.SOURCE_CONNECTION_ID_POSITION):
+            id_bytes_length = int.from_bytes(buf.pull_bytes(1), "big")
+            self.peer_real_connection_id = buf.pull_bytes(id_bytes_length)
+        
+        # send as ip field
+        if(self.fields_present & self.REPLY_AS_SOURCE_IP_POSITION):
+            ip_version = buf.pull_uint8()
+            ip_bytes_length: int = 0
+            if(ip_version == 4):
+                ip_bytes_length = 4
+            elif(ip_version == 6):
+                ip_bytes_length = 16
+            
+            ip_bytes = buf.pull_bytes(ip_bytes_length)
+            self.send_as_addr = IPv6Address(ip_bytes)
+        
+        # send as port field
+        if(self.fields_present & self.REPLY_AS_SOURCE_PORT_POSITION):
+            self.send_as_port = int.from_bytes(buf.pull_bytes(2), "big")
+
+        # reply as source connection id field
+        if(self.fields_present & self.REPLY_AS_SOURCE_CONNECTION_ID_POSITION):
+            id_bytes_length = int.from_bytes(buf.pull_bytes(1), "big")
+            self.send_as_source_connection_id = buf.pull_bytes(id_bytes_length)
+
+        # receive from address
+        if(self.fields_present & self.RECEIVE_FROM_SOURCE_IP_POSITION):
+            ip_version = buf.pull_uint8()
+            ip_bytes_length: int = 0
+            if(ip_version == 4):
+                ip_bytes_length = 4
+            elif(ip_version == 6):
+                ip_bytes_length = 16
+            
+            ip_bytes = buf.pull_bytes(ip_bytes_length)
+            self.recv_from_addr = IPv6Address(ip_bytes)
+
+        # receive from port
+        if(self.fields_present & self.RECEIVE_FROM_SOURCE_PORT_POSITION):
+            self.recv_from_port = int.from_bytes(buf.pull_bytes(2), "big")
+    
+    def to_bytes(self) -> bytes:
+        # A NoneType value means it has not been set. Do not encode this value in the ReplyPath
+        out = bytearray()
+        # append the fields present byte. We will manipulate it as we go
+        out.append(0b00000000)
+        
+        # Source IP
+        if self.peer_real_addr is not None:
+            out[0] |= self.SOURCE_IP_POSITION
+            out.extend( self.peer_real_addr.version.to_bytes(1,"big") )
+            out.extend(self.peer_real_addr.packed)
+            if self._logger: self._logger.debug(f"to_bytes:peer_real_addr: out={out}")
+        
+        # Source port
+        if self.peer_real_port is not None:
+            out[0] |= self.SOURCE_PORT_POSITION
+            out.extend( self.peer_real_port.to_bytes(2,"big") )
+            if self._logger: self._logger.debug(f"to_bytes:peer_real_port: out={out}")
+        
+        # Source Connection ID
+        if self.peer_real_connection_id is not None:
+            out[0] |= self.SOURCE_CONNECTION_ID_POSITION
+            out.extend( len(self.peer_real_connection_id).to_bytes(1,"big") )
+            out.extend(self.peer_real_connection_id)
+            if self._logger: self._logger.debug(f"to_bytes:peer_real_connection_id: out={out}")
+        
+        # Reply As source IP
+        if self.send_as_addr is not None:
+            out[0] |= self.REPLY_AS_SOURCE_IP_POSITION
+            out.extend( self.send_as_addr.version.to_bytes(1,"big") )
+            out.extend(self.send_as_addr.packed)
+            if self._logger: self._logger.debug(f"to_bytes:send_as_addr: out={out}")
+        
+        # Reply As port
+        if self.send_as_port is not None:
+            out[0] |= self.REPLY_AS_SOURCE_PORT_POSITION
+            out.extend( self.send_as_port.to_bytes(2,"big") )
+            if self._logger: self._logger.debug(f"to_bytes:send_as_port: out={out}")
+        
+        # Reply As source connection ID
+        if self.send_as_source_connection_id is not None:
+            out[0] |= self.REPLY_AS_SOURCE_CONNECTION_ID_POSITION
+            out.extend( len(self.send_as_source_connection_id).to_bytes(1,"big") )
+            out.extend(self.send_as_source_connection_id)
+            if self._logger: self._logger.debug(f"to_bytes:send_as_source_connection_id: out={out}")
+
+        # Receive from source address
+        if self.recv_from_addr is not None:
+            out[0] |= self.RECEIVE_FROM_SOURCE_IP_POSITION
+            out.extend( self.recv_from_addr.version.to_bytes(1,"big") )
+            out.extend(self.recv_from_addr.packed)
+            if self._logger: self._logger.debug(f"to_bytes:recv_from_addr: out={out}")
+
+        # Receive from port
+        if self.recv_from_port is not None:
+            out[0] |= self.RECEIVE_FROM_SOURCE_PORT_POSITION
+            out.extend( self.recv_from_port.to_bytes(2,"big") )
+            if self._logger: self._logger.debug(f"to_bytes:recv_from_port: out={out}")
+        
+        # make it immutable and return
+        return bytes(out)
+
+    # update an exisitng QuicNetworkPath from a received ReplyPath frame.
+    def update_QuicNetworkPath_from_ReplyPath(self, qnp: QuicNetworkPath) -> QuicNetworkPath:
+        # source ip field
+        if(self.fields_present & self.SOURCE_IP_POSITION):
+            qnp.addr = [self.peer_real_addr.compressed, qnp.addr[1], qnp.addr[2], qnp.addr[3]]
+        
+        # source port field
+        if(self.fields_present & self.SOURCE_PORT_POSITION):
+            qnp.addr = [qnp.addr[0], self.peer_real_port, qnp.addr[2], qnp.addr[3]]
+        
+        # source connection id field
+        if(self.fields_present & self.SOURCE_CONNECTION_ID_POSITION):
+            qnp.peer_destination_id = self.peer_real_connection_id
+        
+        # send as ip field
+        if(self.fields_present & self.REPLY_AS_SOURCE_IP_POSITION):
+            if qnp.send_as is None:
+                qnp.send_as = ['',0,0,0]
+            qnp.send_as[0] = self.send_as_addr.compressed
+        
+        # send as port field
+        if(self.fields_present & self.REPLY_AS_SOURCE_PORT_POSITION):
+            if qnp.send_as is None:
+                qnp.send_as = ['',0,0,0]
+            qnp.send_as[1] = self.send_as_port
+
+        # reply as source connection id field
+        if(self.fields_present & self.REPLY_AS_SOURCE_CONNECTION_ID_POSITION):
+            qnp.send_as_conn_id = self.send_as_source_connection_id
+
+        # receive from address
+        if(self.fields_present & self.RECEIVE_FROM_SOURCE_IP_POSITION):
+            qnp.recv_from = [self.recv_from_addr, qnp.recv_from[1], qnp.recv_from[2], qnp.recv_from[3]]
+        
+        # receive from port
+        if(self.fields_present & self.RECEIVE_FROM_SOURCE_PORT_POSITION):
+            qnp.recv_from = [qnp.recv_from[0], self.recv_from_port, qnp.recv_from[2], qnp.recv_from[3]]
+        
+        return qnp
+
+    # generates a ReplyPath to send to the peer. Values must be valid from the peer's perspective.
+    # ie Prepare a ReplyPath for the server's perspective with data from the client's perspective.
+    def prep_to_send_from_QuicNetworkPath(self, qnp: QuicNetworkPath, host_cid: Optional[QuicConnectionId]) -> Self:
+        
+        # Reset fields present byte
+        self.fields_present = 0x00
+        
+        # Source IP/Port
+        if qnp.self_addr is not None:
+            # IP
+            self.fields_present |= self.SOURCE_IP_POSITION
+            self.peer_real_addr = IPv6Address(qnp.self_addr[0])
+            # Port
+            self.fields_present |= self.SOURCE_PORT_POSITION
+            self.peer_real_port = qnp.self_addr[1]
+        
+        # Source Connection ID
+        if host_cid is not None:
+            self.fields_present |= self.SOURCE_CONNECTION_ID_POSITION
+            self.peer_real_connection_id = host_cid
+        
+        # Reply As source IP/Port
+        if qnp.recv_from is not None:
+            # IP
+            self.fields_present |= self.REPLY_AS_SOURCE_IP_POSITION
+            self.send_as_addr = IPv6Address(qnp.recv_from[0])
+            # Port
+            self.fields_present |= self.REPLY_AS_SOURCE_PORT_POSITION
+            self.send_as_port = qnp.recv_from[1]
+        
+        # Reply As source connection ID
+        if qnp.recv_from_conn_id is not None:
+            self.fields_present |= self.REPLY_AS_SOURCE_CONNECTION_ID_POSITION
+            self.send_as_source_connection_id = qnp.recv_from_conn_id
+
+        # Receive from IP/Port
+        if qnp.send_as is not None:
+            # IP
+            self.fields_present |= self.RECEIVE_FROM_SOURCE_IP_POSITION
+            self.recv_from_addr = IPv6Address(qnp.send_as[0])
+            # Port
+            self.fields_present |= self.RECEIVE_FROM_SOURCE_PORT_POSITION
+            self.recv_from_port = qnp.send_as[1]
+        
+        return self
+
+    def to_QuicNetworkPath(self, self_address: NetworkAddress|None = None) -> QuicNetworkPath:
+        new_qnp = QuicNetworkPath(addr=[self.peer_real_addr.compressed, self.peer_real_port, 0, 0])
+        new_qnp.self_addr = self_address
+        return self.update_QuicNetworkPath_from_ReplyPath(new_qnp)
+
+
+@dataclass
+class ClientKey:
+    algoithm_name: tls.CipherSuite
+    algorithm_value: int
+    key: bytes
+
+    class UnsupportedCipher(TypeError):
+        description = "Cipher algorithm encountered that is not supported in tls CipherSuite while generating ClientKey from bytes."
+
+    # generate key length in bytes from alrorithm
+    def key_length(self) -> int:
+        return tls.CIPHER_KEY_LENGTHS[self.algorithm]
+
+    def from_bytes(self, buf: bytes) -> Self:
+        if buf[0:2] in set(i.value for i in tls.CipherSuite):
+            self.algorithm_value = buf[0:2]
+            for i in tls.CipherSuite:
+                if i.value == self.algorithm_value:
+                    self.algorithm = i
+                    break
+            self.key = bytes[2:2+tls.CIPHER_KEY_LENGTHS[self.algorithm]]
+        else:
+            raise CryptoError("Cipher algorithm encountered that is not supported in tls CipherSuite while generating ClientKey from bytes.")
+        return self
+
+    def to_bytes(self) -> bytes:
+        ret = bytearray()
+        ret.extend(self.algorithm_value)
+        ret.extend(self.key)
+        return bytes(ret)
+
 
 
 END_STATES = frozenset(
@@ -248,6 +599,7 @@ class QuicConnection:
         retry_source_connection_id: Optional[bytes] = None,
         session_ticket_fetcher: Optional[tls.SessionTicketFetcher] = None,
         session_ticket_handler: Optional[tls.SessionTicketHandler] = None,
+        self_address: Optional[Tuple[str,int]]
     ) -> None:
         if configuration.is_client:
             assert (
@@ -272,6 +624,9 @@ class QuicConnection:
         self._is_client = configuration.is_client
         
         self._ack_delay = K_GRANULARITY
+        # ConfidentialQUIC New
+        self._client_key: Optional[ClientKey] = None
+        #####
         self._close_at: Optional[float] = None
         self._close_event: Optional[events.ConnectionTerminated] = None
         self._connect_called = False
@@ -335,8 +690,17 @@ class QuicConnection:
         self._remote_max_stream_data_uni = 0
         self._remote_max_streams_bidi = 0
         self._remote_max_streams_uni = 0
+        # ConfidentialQUIC New
+        self._reply_path_send: Optional[ReplyPathV2] = None # Sent to peer
+        self._reply_path_receive: Optional[ReplyPathV2] = None # Received from peer
+        #####
         self._retry_count = 0
         self._retry_source_connection_id = retry_source_connection_id
+        # ConfidentialQUIC New
+        # TODO: can't decide if this should be stored in each network path (maybe the server has multiple IP addresses?)
+        # or if it should be global to the connection and an event detected when the OS tells us our IP changed.
+        self.self_address: Tuple[IPv6Address|IPv4Address,int] = (ip_address(self_address[0]),self_address[1])
+        #####
         self._spaces: Dict[tls.Epoch, QuicPacketSpace] = {}
         self._spin_bit = False
         self._spin_highest_pn = 0
@@ -423,6 +787,9 @@ class QuicConnection:
             0x1E: (self._handle_handshake_done_frame, EPOCHS("1")),
             0x30: (self._handle_datagram_frame, EPOCHS("01")),
             0x31: (self._handle_datagram_frame, EPOCHS("01")),
+            # ConfidentialQUIC new
+            0x20: (self._handle_reply_path_frame, EPOCHS("I")), #TODO: EPOCHS
+            0x21: (self._handle_client_key_frame, EPOCHS("I01")), #TODO: EPOCHS
         }
 
     @property
@@ -487,7 +854,12 @@ class QuicConnection:
         ), "connect() can only be called for clients and a single time"
         self._connect_called = True
         
-        self._network_paths = [QuicNetworkPath(addr, is_validated=True, self_addr=self_addr, send_as=send_as, recv_from=recv_from)] # addr is destination address, validated bc we are the client
+        self._network_paths = [QuicNetworkPath( addr,
+                                                is_validated=True,  # validated bc we are the client
+                                                self_addr=self_addr,
+                                                send_as=send_as,
+                                                recv_from=recv_from
+                                            )] # addr is destination address
         self._version = self._configuration.supported_versions[0]
         self._connect(now=now)
     
@@ -871,7 +1243,7 @@ class QuicConnection:
 
             #network_path = self._find_network_path(addr)
             # Finds QuicNetworkPath based on recv_addr
-            # NOTE: Creates path if it does not exist. Handling a ReplyPath Crypto frame will update this network path
+            # NOTE: Creates path if it does not exist but will not add it to the list of paths
             self._logger.debug("connection:receive_datagram first network path check")
             network_path = self._find_conf_network_path(addr)
 
@@ -1024,7 +1396,7 @@ class QuicConnection:
 
             # re-gather network_path. It could have be updated from init packets during _payload_received
             if epoch == tls.Epoch.INITIAL:
-                #self._logger.debug("connection:receive_datagram network_path second check")
+                self._logger.debug("connection:receive_datagram network_path second check")
                 network_path = self._find_conf_network_path(addr)
 
             # update idle timeout
@@ -1209,8 +1581,10 @@ class QuicConnection:
         self._close_at = now + self._configuration.idle_timeout
         self._initialize(self._peer_cid.cid)    # Local TLS init. Sets up streams for each Epoch.
         # Start TLS handshake
-        self.tls.handle_message(b"", self._crypto_buffers, network_paths = self._network_paths)  # serializes/moves ClientHello into cryptoBuffer[Epoch.Initial]
+        self.tls.handle_message(b"", self._crypto_buffers)  # serializes/moves ClientHello into cryptoBuffer[Epoch.Initial]
         self._push_crypto_data()    # sets the crypto data for init packet to be sent
+        self._push_reply_path()     # sets the ReplyPathv2 frame to be sent in the Initial Packet
+        self._push_client_key()     # sets the 
 
     def _discard_epoch(self, epoch: tls.Epoch) -> None:
         if not self._spaces[epoch].discarded:
@@ -1234,12 +1608,13 @@ class QuicConnection:
         self._logger.debug("connection:find_conf_network_path")
         # check existing network paths
         for idx, network_path in enumerate(self._network_paths):
-            if network_path.recv_from == addr:
+            if [IPv6Address(network_path.recv_from[0]),network_path.recv_from[1]] == [IPv6Address(addr[0]), addr[1]]:
                 self._logger.debug(f"Found existing network path: {network_path}")
                 return network_path
 
         # new network path
-        network_path = QuicNetworkPath(addr)
+        network_path = QuicNetworkPath(addr, is_validated=self._is_client)
+        network_path.self_addr = (self.self_address[0].exploded,self.self_address[1], 0, 0)
         self._logger.debug(f"Network path {network_path} discovered")
         return network_path
 
@@ -1525,7 +1900,6 @@ class QuicConnection:
         """
         Handle a CRYPTO frame.
         """
-        self._logger.debug("connection::_handle_crypto_frame")
         offset = buf.pull_uint_var()
         length = buf.pull_uint_var()
         if offset + length > UINT_VAR_MAX:
@@ -1548,8 +1922,7 @@ class QuicConnection:
         if event is not None:
             # pass data to TLS layer
             try:
-                self._logger.debug("passing frame to tls.handle_message")
-                self.tls.handle_message(event.data, self._crypto_buffers, network_paths = self._network_paths)
+                self.tls.handle_message(event.data, self._crypto_buffers)
                 self._push_crypto_data()
             except tls.Alert as exc:
                 raise QuicConnectionError(
@@ -2204,6 +2577,53 @@ class QuicConnection:
                 )
             )
 
+    def _handle_reply_path_frame(self, context: QuicReceiveContext, frame_type: int, buf: Buffer
+    ) -> None:
+        # update network path
+        if self._logger: self._logger.debug("_handle_reply_path_frame")
+
+        peer_reply_path = ReplyPathV2(buf, logger=self._logger)
+        self._reply_path_receive = peer_reply_path
+        if self._logger:self._logger.debug(f"_handle_reply_path: path: {peer_reply_path}")
+
+        # find the existing default to update with this ReplyPathv2 frame (if it exists)
+        idx = None
+        old_path = None
+        for i, path in enumerate(self._network_paths):
+            if (
+                path.addr == path.recv_from # isn't confidential (default)
+                and [IPv6Address(path.addr[0]), path.addr[1], 0, 0] == [peer_reply_path.recv_from_addr, peer_reply_path.recv_from_port, 0, 0] # who we received from is who the client told us to receive from
+                or
+                path.addr != path.recv_from # is confidential
+            ):
+                idx = i
+                old_path = path
+        
+        # update
+        if idx is not None:
+            if self._logger: self._logger.info(f"Updating NetworkPath: {old_path} from \nnew PeerReplyPath: {peer_reply_path}")
+            peer_reply_path.update_QuicNetworkPath_from_ReplyPath( self._network_paths[idx] )
+            if self._logger: self._logger.info(f"Updated to: {self._network_paths[idx]}")
+        else: # add new
+            if self._logger: self._logger.info(f"Appending new NetworkPath")
+            # write in the self address from an existing network-path
+            _self_addr = self._network_paths[0].self_addr
+            new_path = peer_reply_path.to_QuicNetworkPath(_self_addr)
+            self._network_paths.append(new_path)
+            if self._logger: self._logger.info(f"New NetworkPath: {new_path}")
+
+        # If we're the server then generate our own for sending to client.
+        # All server needs to send is its selected connection ID. The client has chosen everything else
+        if not self._is_client:
+            r = ReplyPathV2(logger=self._logger)
+            r.peer_real_connection_id = self.host_cid
+            self._push_reply_path(reply_path=r)
+        
+
+    def _handle_client_key_frame(self, context: QuicReceiveContext, frame_type: int, buf: Buffer
+    ) -> None:
+        pass
+
     def _log_key_retired(self, key_type: str, trigger: str) -> None:
         """
         Log a key retirement.
@@ -2298,7 +2718,7 @@ class QuicConnection:
         Handle a QUIC packet payload.
         """
         self._logger.debug("connection::_payload_received")
-        buf = Buffer(data=plain)
+        buf = Buffer(data=plain) # The whole packet, 
 
         frame_found = False
         is_ack_eliciting = False
@@ -2327,7 +2747,7 @@ class QuicConnection:
             # handle the frame
             try:
                 self._logger.debug(f"Calling frame_handler for frame_type={frame_type}")
-                frame_handler(context, frame_type, buf)
+                frame_handler(context, frame_type, buf) # buf is the bytes contents of the whole packet, not individual frame bytes
             except BufferReadError:
                 raise QuicConnectionError(
                     error_code=QuicErrorCode.FRAME_ENCODING_ERROR,
@@ -2387,6 +2807,25 @@ class QuicConnection:
         for epoch, buf in self._crypto_buffers.items():
             self._crypto_streams[epoch].sender.write(buf.data)
             buf.seek(0)
+    
+    def _push_reply_path(self,
+                         reply_path: Optional[ReplyPathV2] = None,
+                         quic_network_path: Optional[QuicNetworkPath] = None
+                        ):
+        # Note we are sending this to the peer so the
+        # peer real address from their perspective has to be our real address
+        # likewise our recv_from must be their send_as
+        self._logger.debug("_push_reply_path")
+        if reply_path:
+            self._reply_path_send = reply_path
+        else:
+            if quic_network_path is None:
+                quic_network_path = self._network_paths[0]
+            self._reply_path_send = ReplyPathV2().prep_to_send_from_QuicNetworkPath(qnp=quic_network_path, host_cid=self.host_cid)
+        self._logger.debug(f"_reply_path_send: {self._reply_path_send}")
+    
+    def _push_client_key(self):
+        self._client_key = None
 
     def _send_probe(self) -> None:
         self._probe_pending = True
@@ -2804,13 +3243,15 @@ class QuicConnection:
 
         crypto_stream = self._crypto_streams[epoch]
         space = self._spaces[epoch]
+        reply_path_written: bool = False
+        client_key_written: bool = False
 
         while True:
             if epoch == tls.Epoch.INITIAL:
                 packet_type = PACKET_TYPE_INITIAL
             else:
                 packet_type = PACKET_TYPE_HANDSHAKE
-            builder.start_packet(packet_type, crypto)
+            builder.start_packet(packet_type, crypto) # starts a new packet every iteration
 
             # ACK
             if space.ack_at is not None:
@@ -2822,6 +3263,18 @@ class QuicConnection:
                     builder=builder, space=space, stream=crypto_stream
                 ):
                     self._probe_pending = False
+
+            # ReplyPath and ClientKey
+            if (
+                not self._handshake_complete
+                and packet_type == PACKET_TYPE_INITIAL
+            ):
+                if not reply_path_written:
+                    self._write_reply_path_frame( builder=builder, reply_path=self._reply_path_send )
+                    reply_path_written = True
+                if not client_key_written:
+                    self._write_client_key_frame( builder=builder, client_key=self._client_key )
+                    client_key_written = True
 
             # PING (probe)
             if (
@@ -3254,3 +3707,85 @@ class QuicConnection:
                     limit=limit,
                 )
             )
+
+    
+    # ConfidentialQUIC new
+    def _write_reply_path_frame(
+        self, builder: QuicPacketBuilder, reply_path: ReplyPathV2
+    ) -> None:
+        self._logger.debug(f"_write_reply_path_frame builder total bytes: {builder._total_bytes}")
+        rp_bytes = reply_path.to_bytes()
+        self._logger.debug(f"reply path: {reply_path}")
+        self._logger.debug(f"reply path bytes\n length: {len(rp_bytes)}\n bytes: {rp_bytes}")
+        buf = builder.start_frame(QuicFrameType.REPLY_PATH, capacity=len(rp_bytes))
+        buf.push_bytes(rp_bytes)
+    
+
+    def _write_client_key_frame(
+        self, builder: QuicPacketBuilder, client_key: ClientKey,
+    ) -> None:
+        pass
+
+    def pull_reply_path(buf: Buffer) -> ReplyPathV2:
+        # type
+        #assert buf.pull_uint8() == HandshakeType.REPLY_PATH
+        # length
+        return ReplyPathV2(buf)
+        
+
+    def _client_send_reply_path(self, output_buf: Buffer, reply_path ) -> None:
+        '''
+        if self.__logger: self.__logger.debug("tls:_client_send_reply_path")
+        
+        # Fix circular imports
+        #reply_path = cast(QuicNetworkPath, reply_path)
+        
+        path = ReplyPath(
+                peer_real_addr=IPv6Address(reply_path.self_addr[0]),
+                peer_real_port=reply_path.self_addr[1],
+                send_as_addr=IPv6Address(reply_path.recv_from[0]),   # server sends as client's receive_from
+                send_as_port=reply_path.recv_from[1],
+                recv_from_addr=IPv6Address(reply_path.send_as[0]),   # server receives from client send_as
+                recv_from_port=reply_path.send_as[1]
+            )
+        self.__logger.debug(f"tls:_client_send_reply_path: path: {path}")
+        push_reply_path(output_buf, path)
+        '''
+
+    def _server_handle_reply_path(self, input_buf: Buffer, network_paths) -> None:
+        '''
+        if self.__logger: self.__logger.debug("tls:_server_handle_reply_path")
+
+        # Fix circular imports
+        from .quic.connection import QuicNetworkPath
+        network_paths = cast(List[QuicNetworkPath], network_paths)
+
+        peer_reply_path = pull_reply_path(input_buf)
+        self.__logger.debug(f"_server_handle_reply_path: path: {peer_reply_path}")
+        
+        # convert to QuicNetworkPath
+        new_path = QuicNetworkPath(
+            addr = ( peer_reply_path.peer_real_addr.compressed, peer_reply_path.peer_real_port, 0, 0 ),
+            send_as = ( peer_reply_path.send_as_addr.compressed, peer_reply_path.send_as_port, 0, 0),
+            recv_from = ( peer_reply_path.recv_from_addr.compressed, peer_reply_path.recv_from_port, 0, 0)
+        )
+
+        # find the existing default path with confidential one
+        idx = None
+        old_path = None
+        for i, path in enumerate(network_paths):
+            if (
+                path.addr == path.recv_from # isn't confidential (default)
+                and path.addr == new_path.recv_from
+            ):
+                idx = i
+                old_path = path
+        
+        # replace
+        if idx is not None:
+            self.__logger.info(f"Replacing NetworkPath: {old_path} wtih \nnew NetworkPath: {new_path}")
+            network_paths[idx] = new_path
+        else:
+            self.__logger.info(f"Appending new NetworkPath: {new_path}")
+            network_paths.append(new_path)
+        '''

@@ -2,7 +2,7 @@ from sys import stderr
 import asyncio
 import os
 from functools import partial
-from typing import Callable, Dict, Optional, Text, Union, cast
+from typing import Callable, Dict, Optional, Text, Union, cast, Tuple
 
 from ..buffer import Buffer
 from ..quic.configuration import QuicConfiguration
@@ -34,6 +34,7 @@ class QuicServer(asyncio.DatagramProtocol):
         session_ticket_handler: Optional[SessionTicketHandler] = None,
         retry: bool = False,
         stream_handler: Optional[QuicStreamHandler] = None,
+        serve_address: Tuple[str, int],
     ) -> None:
         self._configuration = configuration
         self._create_protocol = create_protocol
@@ -42,6 +43,7 @@ class QuicServer(asyncio.DatagramProtocol):
         self._session_ticket_fetcher = session_ticket_fetcher
         self._session_ticket_handler = session_ticket_handler
         self._transport: Optional[asyncio.DatagramTransport] = None
+        self._serve_address: Optional[Tuple[str,int]] = serve_address
         self._sock: Optional[ConfidentialSocket] = None
 
         self._stream_handler = stream_handler
@@ -135,6 +137,7 @@ class QuicServer(asyncio.DatagramProtocol):
                 retry_source_connection_id=retry_source_connection_id,
                 session_ticket_fetcher=self._session_ticket_fetcher,
                 session_ticket_handler=self._session_ticket_handler,
+                self_address=self._serve_address
             )
             protocol = self._create_protocol(
                 connection, stream_handler=self._stream_handler
@@ -229,6 +232,7 @@ async def serve(
             session_ticket_handler=session_ticket_handler,
             retry=retry,
             stream_handler=stream_handler,
+            serve_address=(host,port)
         ),
         sock=sock,
     )

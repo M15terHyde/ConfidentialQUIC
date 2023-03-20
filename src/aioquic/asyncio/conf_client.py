@@ -3,7 +3,7 @@ import asyncio
 import ipaddress
 import socket
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator, Callable, Optional, cast
+from typing import AsyncGenerator, Callable, Optional, cast, Tuple
 
 from aioquic.quic.configuration import QuicConfiguration
 from aioquic.quic.connection import NetworkAddress, QuicConnection
@@ -32,7 +32,7 @@ async def connect(
     wait_connected: bool = True,
     local_port: int = 0,
     send_as_ipv6: str = None,
-    send_as_port: str = None,
+    send_as_port: int = None,
     recv_from_ipv6: str = None,
     recv_from_port: int = None,
 ) -> AsyncGenerator[QuicConnectionProtocol, None]:
@@ -75,22 +75,13 @@ async def connect(
     addr = infos[0][4]
     if len(addr) == 2:
         addr = ("::ffff:" + addr[0], addr[1], 0, 0)
-    
-    # prepare QUIC connection
-    if configuration is None:
-        configuration = QuicConfiguration(is_client=True)
-    if configuration.server_name is None:
-        configuration.server_name = server_name
-    connection = QuicConnection(
-        configuration=configuration, session_ticket_handler=session_ticket_handler
-    )
 
-    #TODO: Might could enable the setting of a single filed: ip or port and have a default for the other
+    #TODO: Might could enable the setting of a single field: ip or port and have a default for the other
     # Only accept packets back from this address. Server must reply as this address
     recv_from = (recv_from_ipv6, recv_from_port, 0, 0) if (recv_from_ipv6 is not None and recv_from_port is not None) else None
     print(f"conf_client recv_from: {recv_from}", file=stderr)
 
-    #TODO Might could enable the setting of a single filed: ip or port and have a default for the other
+    #TODO Might could enable the setting of a single field: ip or port and have a default for the other
     # The address we send as
     send_as = (send_as_ipv6, send_as_port, 0, 0) if (send_as_ipv6 is not None and send_as_port is not None) else None
     print(f"conf_client send_as: {send_as}", file=stderr)
@@ -99,6 +90,7 @@ async def connect(
     #sock = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
     sock = ConfidentialSocket()
     completed = False
+    bind_addr: Tuple = None
     try:
         # verify valid local_port
         # port cannot be 0 for conf_cocket as the bind port defaults to send port.
@@ -115,6 +107,19 @@ async def connect(
     finally:
         if not completed:
             sock.close()
+            print(f"ERROR: Failed to bind ConfidentialSocket with address tuple {bind_addr}")
+    
+    # prepare QUIC connection
+    if configuration is None:
+        configuration = QuicConfiguration(is_client=True)
+    if configuration.server_name is None:
+        configuration.server_name = server_name
+    connection = QuicConnection(
+        configuration=configuration,
+        session_ticket_handler=session_ticket_handler,
+        self_address=bind_addr[:2],
+    )
+
     # connect
     transport, protocol = await loop.create_datagram_endpoint(
         lambda: create_protocol(connection, stream_handler=stream_handler),
@@ -123,7 +128,11 @@ async def connect(
     protocol = cast(QuicConnectionProtocol, protocol)
     try:
         print(f"conf_client connecting to {addr}\n as {send_as} and recv_from: {recv_from}", file=stderr)
-        protocol.connect(addr, self_addr=bind_addr, send_as=send_as, recv_from=recv_from)  # addr is destination address
+        protocol.connect(addr,
+                        self_addr=bind_addr,
+                        send_as=send_as,
+                        recv_from=recv_from
+                        )  # addr is destination address
         if wait_connected:
             await protocol.wait_connected()
         yield protocol
