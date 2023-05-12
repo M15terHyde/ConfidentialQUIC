@@ -57,6 +57,12 @@ from .packet_builder import (
 from .recovery import K_GRANULARITY, QuicPacketRecovery, QuicPacketSpace
 from .stream import FinalSizeError, QuicStream, StreamFinishedError
 
+# ConfidentialQUIC New
+from cryptography.hazmat.primitives.asymmetric.types import CERTIFICATE_PUBLIC_KEY_TYPES
+from cryptography.hazmat.primitives.asymmetric.padding import OAEP, MGF1
+from cryptography.hazmat.primitives.hashes import SHA256
+#####
+
 logger = logging.getLogger("quic")
 
 CRYPTO_BUFFER_SIZE = 16384
@@ -647,6 +653,13 @@ class QuicConnection:
         ]
         self.host_cid = self._host_cids[0].cid
         self._host_cid_seq = 1
+        # ConfidentialQUIC new
+        self._initial_asymmetric_padding = OAEP(
+            mgf=MGF1(algorithm=SHA256()),
+            algorithm=SHA256(),
+            label=None,
+        )
+        ###
         self._local_ack_delay_exponent = 3
         self._local_active_connection_id_limit = 8
         self._local_initial_source_connection_id = self._host_cids[0].cid
@@ -709,6 +722,14 @@ class QuicConnection:
         self._streams_blocked_bidi: List[QuicStream] = []
         self._streams_blocked_uni: List[QuicStream] = []
         self._streams_finished: Set[int] = set()
+        # ConfidentialQUIC New
+        self._tls_cert_public_key: Optional[CERTIFICATE_PUBLIC_KEY_TYPES]
+        if configuration.tlsa_certificate:
+            self._tls_cert_public_key = configuration.tlsa_certificate.public_key()
+        else:
+            self._tls_cert_public_key = None
+        print(f"self.tls_cert_public_key: {self._tls_cert_public_key}", file=stderr)
+        #####
         self._version: Optional[int] = None
         self._version_negotiation_count = 0
         
@@ -861,6 +882,8 @@ class QuicConnection:
                                                 recv_from=recv_from
                                             )] # addr is destination address
         self._version = self._configuration.supported_versions[0]
+        if send_as is not None or recv_from is not None:
+            self._version = QuicProtocolVersion.CONFQ_1
         self._connect(now=now)
     
     # NOTE: Encryption of the output happens in this call.
@@ -902,7 +925,7 @@ class QuicConnection:
             for epoch, packet_type in epoch_packet_types:
                 crypto = self._cryptos[epoch]
                 if crypto.send.is_valid():
-                    builder.start_packet(packet_type, crypto) # Passes in the CryptoPair that does the encryption
+                    builder.start_packet(packet_type, crypto)
                     self._write_connection_close_frame(
                         builder=builder,
                         epoch=epoch,
@@ -1275,6 +1298,7 @@ class QuicConnection:
                 plain_header, plain_payload, packet_number = crypto.decrypt_packet(
                     data[start_off:end_off], encrypted_off, space.expected_packet_number
                 )
+                print(f"-AFTER INIT DECRYPTION-\nLENGTH OF HEADER:{len(plain_header)}\nLENGTH OF DATA:{len(plain_payload)}", file=stderr)
             except KeyUnavailableError as exc:
                 self._logger.debug(exc)
                 if self._quic_logger is not None:
@@ -1303,6 +1327,12 @@ class QuicConnection:
                         data={"trigger": "payload_decrypt_error"},
                     )
                 continue
+            
+            # ConfidentialQUIC Asymmetric decryption
+            if (not self._is_client) and (header.packet_type == PACKET_TYPE_INITIAL):
+                plain_payload = self.configuration.private_key.decrypt(plain_payload, padding=self._initial_asymmetric_padding)
+                print(f"-AFTER ASYM DECRYPTION-\nLENGTH OF HEADER:{len(plain_header)}\nLENGTH OF DATA:{len(plain_payload)}", file=stderr)
+
 
             # check reserved bits
             if header.is_long_header:
@@ -3251,7 +3281,11 @@ class QuicConnection:
                 packet_type = PACKET_TYPE_INITIAL
             else:
                 packet_type = PACKET_TYPE_HANDSHAKE
-            builder.start_packet(packet_type, crypto) # starts a new packet every iteration
+            builder.start_packet(packet_type,
+                                 crypto,
+                                 initial_assymetric_crypto=self._tls_cert_public_key,
+                                 initial_asymmetric_padding=self._initial_asymmetric_padding
+                                 ) # starts a new packet every iteration
 
             # ACK
             if space.ack_at is not None:

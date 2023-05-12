@@ -531,6 +531,13 @@ if __name__ == "__main__":
     )
     if args.ca_certs:
         configuration.load_verify_locations(args.ca_certs)
+    # NOTE ConfidentialQUIC Temporary for development
+    if args.certificate:
+        certbytes = None
+        with open(args.certificate, 'r') as f:
+            certbytes = f.read().encode('utf-8').hex() # tlsa data is hex encoded
+        configuration.load_tlsa_certificate(certbytes)
+    ###
     if args.cipher_suites:
         configuration.cipher_suites = [
             CipherSuite[s] for s in args.cipher_suites.split(",")

@@ -35,6 +35,8 @@ try:
 except ImportError:
     uvloop = None
 
+from sys import stderr
+
 logger = logging.getLogger("client")
 
 HttpConnection = Union[H0Connection, H3Connection]
@@ -449,6 +451,13 @@ if __name__ == "__main__":
         "--ca-certs", type=str, help="load CA certificates from the specified file"
     )
     parser.add_argument(
+        "-c",
+        "--certificate",
+        type=str,
+        required=True,
+        help="load the TLS certificate from the specified file",
+    )
+    parser.add_argument(
         "--cipher-suites",
         type=str,
         help="only advertise the given cipher suites, e.g. `AES_256_GCM_SHA384,CHACHA20_POLY1305_SHA256`",
@@ -531,6 +540,10 @@ if __name__ == "__main__":
     )
     if args.ca_certs:
         configuration.load_verify_locations(args.ca_certs)
+    # ConfidentialQUIC new
+    if args.certificate:
+        configuration.load_tlsa_certificate_from_pem_file(args.certificate)
+    ###
     if args.cipher_suites:
         configuration.cipher_suites = [
             CipherSuite[s] for s in args.cipher_suites.split(",")

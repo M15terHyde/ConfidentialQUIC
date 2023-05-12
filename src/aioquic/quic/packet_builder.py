@@ -2,6 +2,14 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+# new for ConfidentialQUIC
+# This might belong in tls.py, but it's also not TLS.
+from cryptography.hazmat.primitives.asymmetric.types import CERTIFICATE_PUBLIC_KEY_TYPES
+from cryptography.hazmat.primitives.asymmetric.padding import OAEP
+from sys import stderr
+from os import urandom
+###
+
 from aioquic.buffer import Buffer, size_uint_var
 from aioquic.tls import Epoch
 from .crypto import CryptoPair
@@ -93,6 +101,10 @@ class QuicPacketBuilder:
         self._header_size = 0
         self._packet: Optional[QuicSentPacket] = None
         self._packet_crypto: Optional[CryptoPair] = None
+        # ConfidentialQUIC
+        self._initial_asymmetric_crypto: Optional[CERTIFICATE_PUBLIC_KEY_TYPES] = None
+        self._initial_asymmetric_padding: Optional[OAEP] = None
+        ####
         self._packet_long_header = False
         self._packet_number = packet_number
         self._packet_start = 0
@@ -183,7 +195,12 @@ class QuicPacketBuilder:
             self._packet.delivery_handlers.append((handler, handler_args))
         return self._buffer
 
-    def start_packet(self, packet_type: int, crypto: CryptoPair) -> None:
+    def start_packet(self,
+                     packet_type: int,
+                     crypto: CryptoPair,
+                     initial_assymetric_crypto: CERTIFICATE_PUBLIC_KEY_TYPES|None = None,
+                     initial_asymmetric_padding: OAEP|None = None
+    ) -> None:
         """
         Starts a new packet.
         """
@@ -247,6 +264,8 @@ class QuicPacketBuilder:
             packet_type=packet_type,
         )
         self._packet_crypto = crypto
+        self._initial_asymmetric_crypto = initial_assymetric_crypto
+        self._initial_asymmetric_padding = initial_asymmetric_padding
         self._packet_long_header = packet_long_header
         self._packet_start = packet_start
         self._packet_type = packet_type
@@ -277,7 +296,7 @@ class QuicPacketBuilder:
                 and self.remaining_flight_space
                 and self.remaining_flight_space > padding_size
             ):
-                padding_size = self.remaining_flight_space
+                padding_size = self.remaining_flight_space      # TODO: This might conflict with async encryption padding
 
             # write padding
             if padding_size > 0:
@@ -324,15 +343,41 @@ class QuicPacketBuilder:
                 buf.push_uint16(self._packet_number & 0xFFFF)
 
             # encrypt in place
-            plain = buf.data_slice(self._packet_start, self._packet_start + packet_size)
-            buf.seek(self._packet_start)
+            plain = buf.data_slice(self._packet_start, self._packet_start + packet_size)    # pull packet header+data
+            buf.seek(self._packet_start)    # empty that packet from the buffer
+            header = plain[0 : self._header_size]
+            body = plain[self._header_size : packet_size]
+            enc_id = int.from_bytes(urandom(4),'big')
+            print(f"""-BEFORE ASYM ENCRYPTION-
+            LENGTH OF HEADER:{len(header)}
+            LENGTH OF DATA:{len(body)}
+            PACKET_TYPE_INITIAL Value={PACKET_TYPE_INITIAL}
+            PACKET_TYPE:{self._packet_type}
+            INITIAL_ASYMMETRIC_CRYPTO:{self._initial_asymmetric_crypto}
+            STACK_FRAME ID:{enc_id}
+            """,
+            file=stderr)
+            if (self._packet_type == PACKET_TYPE_INITIAL) and (self._initial_asymmetric_crypto):
+                newbody = bytearray()
+                key_size_bytes = int(self._initial_asymmetric_crypto.key_size/8) -64 
+                for i in range(0, len(body), key_size_bytes):
+                    chunk = body[i:i + key_size_bytes]
+                    newbody.extend( self._initial_asymmetric_crypto.encrypt(chunk, padding=self._initial_asymmetric_padding) )
+                print(f"""-AFTER ASYM ENCRYPTION-
+                LENGTH OF HEADER:{len(header)}
+                LENGTH OF DATA:{len(body)}
+                KEY SIZE: {self._initial_asymmetric_crypto.key_size}
+                STACK_FRAME ID:{enc_id}
+                """,
+                      file=stderr)
             buf.push_bytes(
                 self._packet_crypto.encrypt_packet(
-                    plain[0 : self._header_size],
-                    plain[self._header_size : packet_size],
+                    header,
+                    body,
                     self._packet_number,
                 )
             )
+            print(f"-AFTER INIT ENCRYPTION-\nLENGTH OF HEADER:{len(header)}\nLENGTH OF DATA:{len(body)}", file=stderr)
             self._packet.sent_bytes = buf.tell() - self._packet_start
             self._packets.append(self._packet)
             if self._packet.in_flight:

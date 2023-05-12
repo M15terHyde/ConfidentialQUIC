@@ -12,6 +12,14 @@ from aioquic.tls import (
 from .logger import QuicLogger
 from .packet import QuicProtocolVersion
 
+# ConfidentialQUIC new
+from cryptography.x509 import (
+    Certificate
+)
+from cryptography.hazmat.primitives.asymmetric.types import CERTIFICATE_PRIVATE_KEY_TYPES
+from sys import stderr
+###
+
 
 @dataclass
 class QuicConfiguration:
@@ -79,11 +87,14 @@ class QuicConfiguration:
     cafile: Optional[str] = None
     capath: Optional[str] = None
     certificate: Any = None
+    # ConfidentialQUIC New
+    tlsa_certificate: Certificate = None
+    #####
     certificate_chain: List[Any] = field(default_factory=list)
     cipher_suites: Optional[List[CipherSuite]] = None
     initial_rtt: float = 0.1
     max_datagram_frame_size: Optional[int] = None
-    private_key: Any = None
+    private_key: CERTIFICATE_PRIVATE_KEY_TYPES = None
     quantum_readiness_test: bool = False
     supported_versions: List[int] = field(
         default_factory=lambda: [
@@ -92,6 +103,7 @@ class QuicConfiguration:
             QuicProtocolVersion.DRAFT_31,
             QuicProtocolVersion.DRAFT_30,
             QuicProtocolVersion.DRAFT_29,
+            QuicProtocolVersion.CONFQ_1, # ConfidentialQUIC
         ]
     )
     verify_mode: Optional[int] = None
@@ -123,6 +135,8 @@ class QuicConfiguration:
                     if isinstance(password, str)
                     else password,
                 )
+        
+        print(f"keyfile loaded. Bit-Length of key={self.private_key.key_size}", file=stderr)
 
     def load_verify_locations(
         self,
@@ -137,3 +151,29 @@ class QuicConfiguration:
         self.cafile = cafile
         self.capath = capath
         self.cadata = cadata
+
+    def load_tlsa_certificate(
+        self,
+        certbyteshex: bytes
+    ) -> None:
+        """
+        Given the contents of the TLSA record bytes in hexadecimal,
+        load it into a Certificate object and store it.
+        """
+        unhex = bytes.fromhex(certbyteshex)
+        certificates = load_pem_x509_certificates(unhex)
+        if len(certificates) > 0:
+            self.tlsa_certificate = certificates[0]
+    
+    def load_tlsa_certificate_from_pem_file(
+            self,
+            pem_file_path: PathLike
+    ) -> None:
+        """
+        Given the contents of the TLSA record bytes in hexadecimal,
+        load it into a Certificate object and store it.
+        """
+        with open(pem_file_path, 'rb') as fp:
+            certificates = load_pem_x509_certificates(fp.read())
+            if len(certificates) > 0:
+                self.tlsa_certificate = certificates[0]

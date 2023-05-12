@@ -21,6 +21,8 @@ from .conf_protocol import QuicConnectionProtocol, QuicStreamHandler
 from src.confidentialSocket.conf_socket import ConfidentialSocket
 from socket import IPPROTO_IPV6, IPV6_V6ONLY
 
+from sys import stderr
+
 __all__ = ["serve"]
 
 
@@ -71,10 +73,13 @@ class QuicServer(asyncio.DatagramProtocol):
         buf = Buffer(data=data)
 
         try:
+            print("attempting to pull header",file=stderr)
             header = pull_quic_header(
                 buf, host_cid_length=self._configuration.connection_id_length
             )
+            print("header pull success", file=stderr)
         except ValueError:
+            print("conf_server: Couldn't pull header. ValueError, returning")
             return
 
         # version negotiation
@@ -82,6 +87,7 @@ class QuicServer(asyncio.DatagramProtocol):
             header.version is not None
             and header.version not in self._configuration.supported_versions
         ):
+            print("conf_server: attempting version negotiation", file=stderr)
             self._sock.sendto(
                 encode_quic_version_negotiation(
                     source_cid=header.destination_cid,
@@ -90,6 +96,7 @@ class QuicServer(asyncio.DatagramProtocol):
                 ),
                 addr,
             )
+            print("version negotiation packet sent", file=stderr)
             return
 
         protocol = self._protocols.get(header.destination_cid, None)
@@ -105,6 +112,7 @@ class QuicServer(asyncio.DatagramProtocol):
                 if not header.token:
                     # create a retry token
                     source_cid = os.urandom(8)
+                    print("sending retry token", file=stderr)
                     self._sock.sendto(
                         encode_quic_retry(
                             version=header.version,
@@ -117,6 +125,7 @@ class QuicServer(asyncio.DatagramProtocol):
                         ),
                         addr,
                     )
+                    print("retry token sent", file=stderr)
                     return
                 else:
                     # validate retry token
@@ -131,6 +140,7 @@ class QuicServer(asyncio.DatagramProtocol):
                 original_destination_connection_id = header.destination_cid
 
             # create new connection
+            print("creating new connection", file=stderr)
             connection = QuicConnection(
                 configuration=self._configuration,
                 original_destination_connection_id=original_destination_connection_id,
@@ -159,7 +169,10 @@ class QuicServer(asyncio.DatagramProtocol):
             self._protocols[connection.host_cid] = protocol
 
         if protocol is not None:
+            print("conf_server: calling protocol.datagram_received")
             protocol.datagram_received(data, addr)
+        
+        print("end of conf_server.datagram_received", file=stderr)
 
     def _connection_id_issued(self, cid: bytes, protocol: QuicConnectionProtocol):
         self._protocols[cid] = protocol
